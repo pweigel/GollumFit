@@ -905,6 +905,14 @@ void GollumFit::ConstructLikelihoodProblem(){
 double GollumFit::EvalLLH(std::vector<double> nuisance, bool include_prior) const {
   if(not likelihood_problem_constructed_)
     throw std::runtime_error("Likelihood problem has not been constructed..");
+
+#ifdef GOLLUMFIT_USE_CUDA
+  // Use GPU acceleration if enabled
+  if (gpu_acceleration_enabled_ && gpuAccelerator_) {
+    return gpuAccelerator_->evaluateLikelihood(nuisance, include_prior);
+  }
+#endif
+
   return -prob_->evaluateLikelihood(nuisance,include_prior);
 }
 
@@ -915,6 +923,34 @@ double GollumFit::EvalLLH(FitParameters nuisance, bool include_prior) const {
 phys_tools::autodiff::FD<38> GollumFit::EvalLLHGradient(std::vector<phys_tools::autodiff::FD<38>> v) const {
   return -prob_->evaluateLikelihood(v);
 }
+
+#ifdef GOLLUMFIT_USE_CUDA
+std::pair<double, std::vector<double>> GollumFit::EvalLLHWithGradient(
+    std::vector<double> params, bool include_prior) const {
+  if (!likelihood_problem_constructed_)
+    throw std::runtime_error("Likelihood problem has not been constructed..");
+
+  // GPU path: finite differences (~77 GPU evals)
+  if (gpu_acceleration_enabled_ && gpuAccelerator_) {
+    std::vector<double> gradient;
+    double value = gpuAccelerator_->evaluateLikelihoodWithGradient(
+        params, gradient, include_prior);
+    return {value, gradient};
+  }
+
+  // CPU fallback: autodiff with FD<38>
+  using GradType = phys_tools::autodiff::FD<38>;
+  std::vector<GradType> ad_params(params.size());
+  for (size_t i = 0; i < params.size(); i++)
+    ad_params[i] = GradType(params[i], i);
+  GradType result = -prob_->evaluateLikelihood(ad_params, include_prior);
+
+  std::vector<double> gradient(params.size());
+  for (size_t i = 0; i < params.size(); i++)
+    gradient[i] = result.derivative(i);
+  return {result.value(), gradient};
+}
+#endif
 
 void GollumFit::ForceFitSeedSanity(){
   for(auto & fitSeed: fitSeed_)
@@ -935,6 +971,22 @@ void GollumFit::ForceFitSeedSanity(FitParameters& fitSeed) {
   }
 
 }
+
+#ifdef GOLLUMFIT_USE_CUDA
+namespace {
+class GPU_BFGS_Function : public phys_tools::lbfgsb::BFGS_FunctionBase {
+  const GollumFit& fitter_;
+public:
+  explicit GPU_BFGS_Function(const GollumFit& f) : fitter_(f) {}
+  double evalF(std::vector<double> x) const override {
+    return fitter_.EvalLLH(x, true);
+  }
+  std::pair<double, std::vector<double>> evalFG(std::vector<double> x) const override {
+    return fitter_.EvalLLHWithGradient(x, true);
+  }
+};
+} // anonymous namespace
+#endif
 
 // make a copy of this function to ML-augment
 FitResult GollumFit::MinLLH() const {
@@ -1004,7 +1056,16 @@ FitResult GollumFit::MinLLH() const {
     }
 
     FitResult result;
-    result.succeeded=DoFitLBFGSB(*prob_, minimizer);
+#ifdef GOLLUMFIT_USE_CUDA
+    if (gpu_acceleration_enabled_ && gpuAccelerator_) {
+      GPU_BFGS_Function gpuFunc(*this);
+      result.succeeded = minimizer.minimize(gpuFunc);
+    } else {
+      result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+    }
+#else
+    result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+#endif
     result.likelihood=minimizer.minimumValue();
     
     // printing out LH here! 
@@ -1388,5 +1449,361 @@ int GollumFit::CheckExpectation(std::vector<double> fit_params) const {
     return PullBinEdges<0>(2,simHist_);
   }
 
+#ifdef GOLLUMFIT_USE_CUDA
+/*************************************************************************************************************
+ * GPU Acceleration Functions
+ * **********************************************************************************************************/
+
+#ifdef GOLLUMFIT_USE_CUDA
+// Helper function to upload a photospline table to GPU
+static void uploadPhotosplineToGPU(
+    gpu::GPUFitAccelerator* accelerator,
+    const std::string& name,
+    const splinetable<>& spline
+) {
+    int ndim = spline.get_ndim();
+
+    // Extract orders
+    std::vector<int> orders(ndim);
+    for (int d = 0; d < ndim; ++d) {
+        orders[d] = spline.get_order(d);
+    }
+
+    // Extract knot vectors
+    std::vector<std::vector<double>> knots(ndim);
+    std::vector<int> nknots(ndim);
+    for (int d = 0; d < ndim; ++d) {
+        nknots[d] = spline.get_nknots(d);
+        knots[d].resize(nknots[d]);
+        const double* knotPtr = spline.get_knots(d);
+        std::copy(knotPtr, knotPtr + nknots[d], knots[d].begin());
+    }
+
+    // Extract coefficients (photospline stores as float, GPU expects double)
+    size_t ncoeffs = spline.get_ncoeffs();
+    std::vector<double> coeffs(ncoeffs);
+    const float* coeffPtr = spline.get_coefficients();
+    for (size_t i = 0; i < ncoeffs; ++i) {
+        coeffs[i] = static_cast<double>(coeffPtr[i]);
+    }
+
+    // Upload to GPU
+    accelerator->uploadSpline(name, ndim, orders.data(), knots, coeffs, nknots.data());
+}
+#endif // GOLLUMFIT_USE_CUDA
+
+bool GollumFit::EnableGPUAcceleration(int deviceId) {
+  if (!simulation_histogram_constructed_) {
+    throw std::runtime_error("Cannot enable GPU acceleration: simulation histogram not constructed");
+  }
+  if (!data_histogram_constructed_) {
+    throw std::runtime_error("Cannot enable GPU acceleration: data histogram not constructed");
+  }
+
+  try {
+    // Configure GPU accelerator
+    gpu::GPUAcceleratorConfig config;
+    config.deviceId = deviceId;
+    config.enableProfiling = false;
+
+    // Create GPU accelerator
+    gpuAccelerator_ = std::make_unique<gpu::GPUFitAccelerator>(config);
+
+    // Set up histogram configuration
+    gpu::HistogramConfig histConfig;
+    auto energyEdges = GetEnergyBinsMC();
+    auto zenithEdges = GetZenithBinsMC();
+    auto topoEdges = GetTopologyBinsMC();
+
+    histConfig.nBinsEnergy = static_cast<int>(energyEdges.size()) - 1;
+    histConfig.nBinsZenith = static_cast<int>(zenithEdges.size()) - 1;
+    histConfig.nBinsTopology = static_cast<int>(topoEdges.size()) - 1;
+    histConfig.energyEdges = energyEdges;
+    histConfig.zenithEdges = zenithEdges;
+
+    // Get events to upload (prefer meta events if fast mode is constructed)
+    const std::deque<Event>& events = fastmode_constructed_ ? metaEvents_ : mainSimulation_;
+
+    // Initialize GPU with events
+    gpuAccelerator_->initialize(events, histConfig);
+
+    // Upload spline tables to GPU
+    std::cout << "  Uploading splines to GPU..." << std::endl;
+    int splinesUploaded = 0;
+
+    // Upload DOM efficiency splines
+    for (const auto& entry : domefficiencySplines_) {
+        std::string name = "domeff_" + GetFluxComponentName(entry.first.first) + "_" +
+                          GetTopologyName(entry.first.second);
+        uploadPhotosplineToGPU(gpuAccelerator_.get(), name, *entry.second);
+        splinesUploaded++;
+    }
+
+    // Upload hole ice splines
+    for (const auto& entry : holeIceSplines_) {
+        std::string name = "holeice_" + GetFluxComponentName(entry.first.first) + "_" +
+                          GetTopologyName(entry.first.second);
+        uploadPhotosplineToGPU(gpuAccelerator_.get(), name, *entry.second);
+        splinesUploaded++;
+    }
+
+    // Upload attenuation splines
+    for (const auto& entry : attenuationSplines_) {
+        std::string name = "attenuation_" + GetFluxComponentName(entry.first.first) + "_" +
+                          GetParticleName(entry.first.second);
+        uploadPhotosplineToGPU(gpuAccelerator_.get(), name, *entry.second);
+        splinesUploaded++;
+    }
+
+    std::cout << "  Uploaded " << splinesUploaded << " splines to GPU" << std::endl;
+
+    // Build spline lookup table for kernel access
+    gpuAccelerator_->buildSplineLookup();
+
+    // Upload data histogram
+    // dataHist has shape [topology][zenith][energy] (extent(0)=topo, extent(1)=zenith, extent(2)=energy)
+    // GPU bin index layout is [energy][zenith][topology]:
+    //   binIdx = eBin * nBinsZenith * nBinsTopology + zBin * nBinsTopology + topo
+    auto dataHist = GetDataDistribution();
+    std::vector<double> dataCount(histConfig.totalBins(), 0.0);
+    for (size_t it = 0; it < dataHist.extent(0); ++it) {      // topology
+      for (size_t iz = 0; iz < dataHist.extent(1); ++iz) {    // zenith
+        for (size_t ie = 0; ie < dataHist.extent(2); ++ie) {  // energy
+          int binIdx = ie * histConfig.nBinsZenith * histConfig.nBinsTopology +
+                       iz * histConfig.nBinsTopology + it;
+          dataCount[binIdx] = dataHist[it][iz][ie];
+        }
+      }
+    }
+    gpuAccelerator_->uploadDataHistogram(dataCount);
+
+    // Set up priors from priors_ member
+    std::vector<gpu::PriorConfig> priorConfigs(gpu::NUM_FIT_PARAMS);
+    if (priors_constructed_) {
+      // Map Priors struct to GPU PriorConfig vector
+      // Order matches ConvertFitParameters: [0]=convNorm, [1]=promptNorm, ...
+      // NOTE: use double to avoid truncating DBL_MAX to float inf
+      auto setPrior = [](gpu::PriorConfig& pc, double center, double width) {
+        pc.hasPrior = true;
+        pc.mean = center;
+        pc.sigma = width;
+      };
+
+      // Standard flux parameters
+      setPrior(priorConfigs[0],  priors_.convNormCenter,         priors_.convNormWidth);
+      setPrior(priorConfigs[1],  priors_.promptNormCenter,       priors_.promptNormWidth);
+      setPrior(priorConfigs[2],  priors_.zenithCorrectionCenter, priors_.zenithCorrectionWidth);
+      setPrior(priorConfigs[3],  priors_.kaonLossesCenter,       priors_.kaonLossesWidth);
+
+      // Hadronic parameters [4-13]: CPU uses std::numeric_limits<double>::max() as sigma
+      // (NOT priors_ widths) — must match to get identical normalization constants
+      constexpr double flatWidth = std::numeric_limits<double>::max();
+      setPrior(priorConfigs[4],  priors_.hadronicHEkpCenter,     flatWidth);
+      setPrior(priorConfigs[5],  priors_.hadronicHEkmCenter,     flatWidth);
+      setPrior(priorConfigs[6],  priors_.hadronicVHE1pipCenter,  flatWidth);
+      setPrior(priorConfigs[7],  priors_.hadronicVHE1pimCenter,  flatWidth);
+      setPrior(priorConfigs[8],  priors_.hadronicVHE3kpCenter,   flatWidth);
+      setPrior(priorConfigs[9],  priors_.hadronicVHE3kmCenter,   flatWidth);
+      setPrior(priorConfigs[10], priors_.hadronicVHE3pipCenter,  flatWidth);
+      setPrior(priorConfigs[11], priors_.hadronicVHE3pimCenter,  flatWidth);
+      setPrior(priorConfigs[12], priors_.hadronicVHE3pCenter,    flatWidth);
+      setPrior(priorConfigs[13], priors_.hadronicVHE3nCenter,    flatWidth);
+
+      // Cosmic ray parameters [14-19]: CPU uses max() sigma
+      setPrior(priorConfigs[14], priors_.cosmicRay1Center,       flatWidth);
+      setPrior(priorConfigs[15], priors_.cosmicRay2Center,       flatWidth);
+      setPrior(priorConfigs[16], priors_.cosmicRay3Center,       flatWidth);
+      setPrior(priorConfigs[17], priors_.cosmicRay4Center,       flatWidth);
+      setPrior(priorConfigs[18], priors_.cosmicRay5Center,       flatWidth);
+      setPrior(priorConfigs[19], priors_.cosmicRay6Center,       flatWidth);
+
+      // Ice gradient parameters [20-28]: CPU uses max() sigma
+      setPrior(priorConfigs[20], priors_.icegrad0Center,         flatWidth);
+      setPrior(priorConfigs[21], priors_.icegrad1Center,         flatWidth);
+      setPrior(priorConfigs[22], priors_.icegrad2Center,         flatWidth);
+      setPrior(priorConfigs[23], priors_.icegrad3Center,         flatWidth);
+      setPrior(priorConfigs[24], priors_.icegrad4Center,         flatWidth);
+      setPrior(priorConfigs[25], priors_.icegrad5Center,         flatWidth);
+      setPrior(priorConfigs[26], priors_.icegrad6Center,         flatWidth);
+      setPrior(priorConfigs[27], priors_.icegrad7Center,         flatWidth);
+      setPrior(priorConfigs[28], priors_.icegrad8Center,         flatWidth);
+
+      // Detector systematics
+      setPrior(priorConfigs[29], priors_.domEfficiencyCenter,    priors_.domEfficiencyWidth);
+      setPrior(priorConfigs[30], priors_.holeiceForwardCenter,   priors_.holeiceForwardWidth);
+
+      // Astro parameters
+      setPrior(priorConfigs[31], priors_.astroNormCenter,        priors_.astroNormWidth);
+      setPrior(priorConfigs[32], priors_.astroDeltaGammaCenter,  priors_.astroDeltaGammaWidth);
+      setPrior(priorConfigs[33], priors_.astroDeltaGammaSecCenter, priors_.astroDeltaGammaSecWidth);
+      // Index 34: astroPivot has uniform prior (not Gaussian)
+      priorConfigs[34].hasPrior = false;
+      setPrior(priorConfigs[35], priors_.NeutrinoAntineutrinoRatioCenter, priors_.NeutrinoAntineutrinoRatioWidth);
+
+      // Cross-section systematics
+      setPrior(priorConfigs[36], priors_.nuxsCenter,             priors_.nuxsWidth);
+      setPrior(priorConfigs[37], priors_.nubarxsCenter,          priors_.nubarxsWidth);
+    }
+    gpuAccelerator_->setPriors(priorConfigs);
+
+    // Set up N-dimensional correlated Gaussian priors (matching CPU's GaussianNDPrior)
+    if (priors_constructed_) {
+      // Helper to build an NDPriorConfig from center/width/correlation data
+      auto buildNDPrior = [](const std::vector<double>& centers,
+                              const std::vector<double>& widths,
+                              const std::vector<std::vector<double>>& corr,
+                              const std::vector<int>& paramIndices) -> gpu::NDPriorConfig {
+        int n = static_cast<int>(centers.size());
+        gpu::NDPriorConfig cfg;
+        cfg.size = n;
+        cfg.paramIndices = paramIndices;
+        cfg.means = centers;
+        cfg.stddevs = widths;
+
+        // Compute inverse and determinant of correlation matrix (matching PhysTools)
+        namespace ublas = boost::numeric::ublas;
+        ublas::matrix<double> corrMatrix(n, n);
+        for (int i = 0; i < n; i++)
+          for (int j = 0; j < n; j++)
+            corrMatrix(i, j) = corr[i][j];
+
+        // LU factorization for determinant
+        ublas::matrix<double> mLU(corrMatrix);
+        ublas::permutation_matrix<size_t> pivots(n);
+        int isSingular = ublas::lu_factorize(mLU, pivots);
+        double det = 1.0;
+        if (!isSingular) {
+          for (int i = 0; i < n; i++) {
+            if (pivots(i) != static_cast<size_t>(i)) det *= -1.0;
+            det *= mLU(i, i);
+          }
+        }
+
+        // Inverse correlation matrix
+        ublas::matrix<double> invMat = ublas::identity_matrix<double>(n);
+        ublas::matrix<double> corrCopy(corrMatrix);
+        ublas::permutation_matrix<size_t> pivots2(n);
+        ublas::lu_factorize(corrCopy, pivots2);
+        ublas::lu_substitute(corrCopy, pivots2, invMat);
+
+        cfg.inverseCorr.resize(n * n);
+        for (int i = 0; i < n; i++)
+          for (int j = 0; j < n; j++)
+            cfg.inverseCorr[i * n + j] = invMat(i, j);
+
+        // lnorm = log(sqrt((1/(2*pi))^n / det))
+        cfg.lnorm = std::log(std::sqrt(
+            std::pow(boost::math::constants::one_div_two_pi<double>(), n) / det));
+
+        return cfg;
+      };
+
+      // Flux prior (16D): hadronic [4-13] + cosmic ray [14-19]
+      std::vector<double> fluxCenters = {
+        priors_.hadronicHEkpCenter, priors_.hadronicHEkmCenter,
+        priors_.hadronicVHE1pipCenter, priors_.hadronicVHE1pimCenter,
+        priors_.hadronicVHE3kpCenter, priors_.hadronicVHE3kmCenter,
+        priors_.hadronicVHE3pipCenter, priors_.hadronicVHE3pimCenter,
+        priors_.hadronicVHE3pCenter, priors_.hadronicVHE3nCenter,
+        priors_.cosmicRay1Center, priors_.cosmicRay2Center,
+        priors_.cosmicRay3Center, priors_.cosmicRay4Center,
+        priors_.cosmicRay5Center, priors_.cosmicRay6Center
+      };
+      std::vector<double> fluxWidths = {
+        priors_.hadronicHEkpWidth, priors_.hadronicHEkmWidth,
+        priors_.hadronicVHE1pipWidth, priors_.hadronicVHE1pimWidth,
+        priors_.hadronicVHE3kpWidth, priors_.hadronicVHE3kmWidth,
+        priors_.hadronicVHE3pipWidth, priors_.hadronicVHE3pimWidth,
+        priors_.hadronicVHE3pWidth, priors_.hadronicVHE3nWidth,
+        priors_.cosmicRay1Width, priors_.cosmicRay2Width,
+        priors_.cosmicRay3Width, priors_.cosmicRay4Width,
+        priors_.cosmicRay5Width, priors_.cosmicRay6Width
+      };
+      std::vector<std::vector<double>> fluxCorr(16);
+      for (int i = 0; i < 16; i++) {
+        fluxCorr[i].resize(16);
+        for (int j = 0; j < 16; j++)
+          fluxCorr[i][j] = priors_.flux_corr[i][j];
+      }
+      std::vector<int> fluxIndices = {4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19};
+      gpuAccelerator_->addNDPrior(buildNDPrior(fluxCenters, fluxWidths, fluxCorr, fluxIndices));
+
+      // Ice prior (9D): ice gradients [20-28]
+      std::vector<double> iceCenters = {
+        priors_.icegrad0Center, priors_.icegrad1Center, priors_.icegrad2Center,
+        priors_.icegrad3Center, priors_.icegrad4Center, priors_.icegrad5Center,
+        priors_.icegrad6Center, priors_.icegrad7Center, priors_.icegrad8Center
+      };
+      std::vector<double> iceWidths = {
+        priors_.icegrad0Width, priors_.icegrad1Width, priors_.icegrad2Width,
+        priors_.icegrad3Width, priors_.icegrad4Width, priors_.icegrad5Width,
+        priors_.icegrad6Width, priors_.icegrad7Width, priors_.icegrad8Width
+      };
+      std::vector<std::vector<double>> iceCorr(9);
+      for (int i = 0; i < 9; i++) {
+        iceCorr[i].resize(9);
+        for (int j = 0; j < 9; j++)
+          iceCorr[i][j] = priors_.ice_corr[i][j];
+      }
+      std::vector<int> iceIndices = {20,21,22,23,24,25,26,27,28};
+      gpuAccelerator_->addNDPrior(buildNDPrior(iceCenters, iceWidths, iceCorr, iceIndices));
+    }
+
+    gpu_acceleration_enabled_ = true;
+
+    std::cout << "GPU acceleration enabled on device " << deviceId << std::endl;
+    auto info = gpuAccelerator_->getDeviceInfo();
+    std::cout << "  Device: " << info.name << std::endl;
+    std::cout << "  Memory: " << info.totalGlobalMem / (1024 * 1024) << " MB" << std::endl;
+    std::cout << "  Events uploaded: " << gpuAccelerator_->getNumEvents() << std::endl;
+    std::cout << "  Histogram bins: " << gpuAccelerator_->getNumBins() << std::endl;
+
+    return true;
+  }
+  catch (const std::exception& e) {
+    std::cerr << "Failed to enable GPU acceleration: " << e.what() << std::endl;
+    gpuAccelerator_.reset();
+    gpu_acceleration_enabled_ = false;
+    return false;
+  }
+}
+
+void GollumFit::DisableGPUAcceleration() {
+  gpu_acceleration_enabled_ = false;
+  gpuAccelerator_.reset();
+  std::cout << "GPU acceleration disabled, using CPU fallback" << std::endl;
+}
+
+gpu::GPUDeviceInfo GollumFit::GetGPUDeviceInfo() const {
+  if (gpuAccelerator_) {
+    return gpuAccelerator_->getDeviceInfo();
+  }
+  return gpu::GPUDeviceInfo();
+}
+
+gpu::GPUFitAccelerator::TimingStats GollumFit::GetGPUTimingStats() const {
+  if (gpuAccelerator_) {
+    return gpuAccelerator_->getLastTimingStats();
+  }
+  return gpu::GPUFitAccelerator::TimingStats();
+}
+
+std::vector<double> GollumFit::GetGPUEventWeights() const {
+  std::vector<double> weights;
+  if (gpuAccelerator_) {
+    gpuAccelerator_->getEventWeights(weights);
+  }
+  return weights;
+}
+
+std::vector<double> GollumFit::GetGPUExpectationHistogram() const {
+  std::vector<double> hist;
+  if (gpuAccelerator_) {
+    gpuAccelerator_->getExpectationHistogram(hist);
+  }
+  return hist;
+}
+
+#endif // GOLLUMFIT_USE_CUDA
 
 } // close namespace gollumfit

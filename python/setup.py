@@ -10,6 +10,30 @@ if sys.platform in ("win32", "win64"):
     print("Windows is not a supported platform.")
     sys.exit(1)
 
+# Check for CUDA support
+def find_cuda():
+    """Find CUDA installation and return (cuda_home, cuda_available)"""
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+
+    # Try common locations
+    if not cuda_home:
+        for path in ["/usr/local/cuda", "/opt/cuda",
+                     os.path.expandvars("$SROOT/cuda"),
+                     "/n/holylfs05/LABS/arguelles_delgado_lab/Everyone/pweigel/MEOWS_ML/cuda_12.2"]:
+            if os.path.exists(os.path.join(path, "include", "cuda_runtime.h")):
+                cuda_home = path
+                break
+
+    if cuda_home and os.path.exists(os.path.join(cuda_home, "include", "cuda_runtime.h")):
+        return cuda_home, True
+    return None, False
+
+cuda_home, use_cuda = find_cuda()
+if use_cuda:
+    print(f"CUDA found at: {cuda_home}")
+else:
+    print("CUDA not found - building without GPU acceleration")
+
 gollum_build_path = os.environ.get("GOLLUMBUILDPATH", "/usr/local/")
 cvmfs_root = os.environ.get("SROOT", "/usr/local/")
 prefix = os.environ.get("PREFIX", "/usr/local/")
@@ -35,6 +59,7 @@ libraries = [
 
 architecture = os.uname().machine
 library_dirs = [
+    gollum_build_path,  # Library may be directly in build directory
     gollum_build_path + f"/lib/python{sys.version_info[0]}.{sys.version_info[1]}/site-packages",
     gollum_build_path + "/lib",
     gollum_build_path + "/lib64",
@@ -67,6 +92,23 @@ if sys.platform == "darwin":
     extra_link_args += ["-Wl,-rpath,@loader_path"]
     for d in library_dirs:
         extra_link_args += [f"-Wl,-rpath,{d}"]
+else:
+    # On Linux, set rpath to find the correct library - prioritize build directory
+    extra_link_args += [f"-Wl,-rpath,{gollum_build_path}"]
+    for d in library_dirs[:5]:  # Add first few important paths
+        extra_link_args += [f"-Wl,-rpath,{d}"]
+
+# Base compile arguments
+extra_compile_args = ["-v", "-O3", "-fPIC", "-std=c++17", "-fpermissive"]
+
+# Add CUDA support if available
+if use_cuda:
+    print("Enabling CUDA support in Python bindings")
+    extra_compile_args.append("-DGOLLUMFIT_USE_CUDA")
+    include_dirs.append(os.path.join(cuda_home, "include"))
+    library_dirs.append(os.path.join(cuda_home, "lib64"))
+    library_dirs.append(os.path.join(cuda_home, "lib"))
+    libraries.append("cudart")
 
 ext = Pybind11Extension(
     "GollumFitPy",
@@ -75,7 +117,7 @@ ext = Pybind11Extension(
     libraries=libraries,
     include_dirs=include_dirs,
     extra_objects=extra_objs,
-    extra_compile_args=["-v", "-O3", "-fPIC", "-std=c++17", "-fpermissive"],
+    extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,
     language="c++",
 )

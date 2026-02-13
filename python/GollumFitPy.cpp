@@ -1,11 +1,16 @@
 #include <pybind11/pybind11.h>
-#include <pybind11/stl.h> 
+#include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <pybind11/functional.h>
 #include <pybind11/complex.h>
 
 #include <functional>
 #include "GollumFit.h"
+
+#ifdef GOLLUMFIT_USE_CUDA
+#include "cuda/GPUCommon.h"
+#include "cuda/GPUFitAccelerator.h"
+#endif
 
 #include <numpy/ndarrayobject.h>
 #include <numpy/ndarraytypes.h>
@@ -433,6 +438,87 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def("SetIceGradientsCorr",&GF::Priors::SetIceGradientsCorr)
  ;
 
+#ifdef GOLLUMFIT_USE_CUDA
+  //============================================================================
+  // GPU Acceleration Types
+  //============================================================================
+
+  py::class_<gollumfit::gpu::GPUDeviceInfo>(m, "GPUDeviceInfo",
+      "Information about the GPU device used for acceleration")
+    .def(py::init<>())
+    .def_readonly("deviceId", &gollumfit::gpu::GPUDeviceInfo::deviceId,
+        "GPU device ID")
+    .def_readonly("name", &gollumfit::gpu::GPUDeviceInfo::name,
+        "GPU device name (e.g., 'NVIDIA A100-SXM4-80GB')")
+    .def_readonly("computeCapabilityMajor", &gollumfit::gpu::GPUDeviceInfo::computeCapabilityMajor,
+        "CUDA compute capability major version")
+    .def_readonly("computeCapabilityMinor", &gollumfit::gpu::GPUDeviceInfo::computeCapabilityMinor,
+        "CUDA compute capability minor version")
+    .def_readonly("totalGlobalMem", &gollumfit::gpu::GPUDeviceInfo::totalGlobalMem,
+        "Total global memory in bytes")
+    .def_readonly("sharedMemPerBlock", &gollumfit::gpu::GPUDeviceInfo::sharedMemPerBlock,
+        "Shared memory per block in bytes")
+    .def_readonly("maxThreadsPerBlock", &gollumfit::gpu::GPUDeviceInfo::maxThreadsPerBlock,
+        "Maximum threads per block")
+    .def_readonly("multiProcessorCount", &gollumfit::gpu::GPUDeviceInfo::multiProcessorCount,
+        "Number of streaming multiprocessors")
+    .def_readonly("supportsDoublePrecision", &gollumfit::gpu::GPUDeviceInfo::supportsDoublePrecision,
+        "Whether GPU supports FP64 operations")
+    .def_readonly("supportsAtomicAddDouble", &gollumfit::gpu::GPUDeviceInfo::supportsAtomicAddDouble,
+        "Whether GPU supports native FP64 atomic operations (Ampere+)")
+    .def("__repr__", [](const gollumfit::gpu::GPUDeviceInfo& info) {
+        return "<GPUDeviceInfo: " + info.name + " (SM " +
+               std::to_string(info.computeCapabilityMajor) + "." +
+               std::to_string(info.computeCapabilityMinor) + ")>";
+    })
+  ;
+
+  py::class_<gollumfit::gpu::GPUFitAccelerator::TimingStats>(m, "GPUTimingStats",
+      "Timing breakdown from GPU likelihood evaluation")
+    .def(py::init<>())
+    .def_readonly("paramTransferMs", &gollumfit::gpu::GPUFitAccelerator::TimingStats::paramTransferMs,
+        "Time spent transferring parameters to GPU (milliseconds)")
+    .def_readonly("weightComputeMs", &gollumfit::gpu::GPUFitAccelerator::TimingStats::weightComputeMs,
+        "Time spent computing event weights (milliseconds)")
+    .def_readonly("histogramMs", &gollumfit::gpu::GPUFitAccelerator::TimingStats::histogramMs,
+        "Time spent accumulating histogram (milliseconds)")
+    .def_readonly("likelihoodMs", &gollumfit::gpu::GPUFitAccelerator::TimingStats::likelihoodMs,
+        "Time spent evaluating likelihood (milliseconds)")
+    .def_readonly("totalMs", &gollumfit::gpu::GPUFitAccelerator::TimingStats::totalMs,
+        "Total GPU evaluation time (milliseconds)")
+    .def("__repr__", [](const gollumfit::gpu::GPUFitAccelerator::TimingStats& stats) {
+        return "<GPUTimingStats: total=" + std::to_string(stats.totalMs) + "ms, " +
+               "weights=" + std::to_string(stats.weightComputeMs) + "ms, " +
+               "histogram=" + std::to_string(stats.histogramMs) + "ms, " +
+               "likelihood=" + std::to_string(stats.likelihoodMs) + "ms>";
+    })
+  ;
+
+  // Module-level function to check CUDA availability
+  m.def("cuda_available", []() { return true; },
+      "Check if CUDA GPU acceleration is available (compiled with GOLLUMFIT_USE_CUDA)");
+
+  m.def("get_cuda_device_count", []() {
+      int count = 0;
+      cudaGetDeviceCount(&count);
+      return count;
+  }, "Get number of available CUDA devices");
+
+  m.def("query_gpu_device", [](int deviceId) {
+      return gollumfit::gpu::GPUDeviceInfo::query(deviceId);
+  }, py::arg("deviceId") = 0,
+      "Query information about a specific GPU device");
+
+#else
+  // When CUDA is not available, provide stub functions that raise informative errors
+  m.def("cuda_available", []() { return false; },
+      "Check if CUDA GPU acceleration is available (compiled with GOLLUMFIT_USE_CUDA)");
+
+  m.def("get_cuda_device_count", []() {
+      return 0;
+  }, "Get number of available CUDA devices (returns 0 when CUDA not available)");
+#endif
+
   py::class_<GF::GollumFit, std::shared_ptr<GF::GollumFit> >(m, "GollumFit")
     .def(py::init<GF::DataPaths, GF::SteeringParams>())
     .def("ReConfig",&GF::GollumFit::ReConfig<false>)
@@ -468,6 +554,112 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def("SetFitParametersFlag",&GF::GollumFit::SetFitParametersFlag)
     .def("SetFitParametersBound",&GF::GollumFit::SetFitParametersBound)
     .def("SetFitParametersPriors",&GF::GollumFit::SetFitParametersPriors)
+#ifdef GOLLUMFIT_USE_CUDA
+    //==========================================================================
+    // GPU Acceleration Methods
+    //==========================================================================
+    .def("EnableGPUAcceleration", &GF::GollumFit::EnableGPUAcceleration,
+        py::arg("deviceId") = 0,
+        R"doc(
+        Enable GPU acceleration for likelihood evaluation.
+
+        This initializes the GPU accelerator with the current MC events and
+        histogram configuration. Once enabled, EvalLLH will use the GPU for
+        computation, providing significant speedups (typically 20-50x).
+
+        Parameters
+        ----------
+        deviceId : int, optional
+            GPU device ID to use (default: 0)
+
+        Returns
+        -------
+        bool
+            True if GPU acceleration was successfully enabled
+
+        Raises
+        ------
+        RuntimeError
+            If simulation is not loaded or histograms not constructed
+
+        Example
+        -------
+        >>> gf = GollumFit(datapaths, steering)
+        >>> gf.ConstructLikelihoodProblem()
+        >>> if gf.EnableGPUAcceleration():
+        ...     print("GPU acceleration enabled!")
+        ...     print(gf.GetGPUDeviceInfo())
+        )doc")
+    .def("DisableGPUAcceleration", &GF::GollumFit::DisableGPUAcceleration,
+        R"doc(
+        Disable GPU acceleration and fall back to CPU evaluation.
+
+        This releases GPU resources and reverts to the standard CPU-based
+        likelihood evaluation.
+        )doc")
+    .def("IsGPUAccelerationEnabled", &GF::GollumFit::IsGPUAccelerationEnabled,
+        R"doc(
+        Check if GPU acceleration is currently enabled.
+
+        Returns
+        -------
+        bool
+            True if GPU acceleration is enabled and initialized
+        )doc")
+    .def("GetGPUDeviceInfo", &GF::GollumFit::GetGPUDeviceInfo,
+        R"doc(
+        Get information about the GPU device being used.
+
+        Returns
+        -------
+        GPUDeviceInfo
+            Struct containing GPU device properties, or empty struct if not initialized
+
+        Example
+        -------
+        >>> info = gf.GetGPUDeviceInfo()
+        >>> print(f"GPU: {info.name}")
+        >>> print(f"Memory: {info.totalGlobalMem / 1e9:.1f} GB")
+        )doc")
+    .def("GetGPUTimingStats", &GF::GollumFit::GetGPUTimingStats,
+        R"doc(
+        Get timing statistics from the last GPU likelihood evaluation.
+
+        Returns
+        -------
+        GPUTimingStats
+            Struct with breakdown of GPU operation times (in milliseconds)
+
+        Example
+        -------
+        >>> llh = gf.EvalLLH(params, True)
+        >>> stats = gf.GetGPUTimingStats()
+        >>> print(f"Total: {stats.totalMs:.3f} ms")
+        >>> print(f"  Weights: {stats.weightComputeMs:.3f} ms")
+        >>> print(f"  Histogram: {stats.histogramMs:.3f} ms")
+        )doc")
+    .def("EvalLLHWithGradient", &GF::GollumFit::EvalLLHWithGradient,
+        py::arg("params"), py::arg("include_prior"),
+        R"doc(
+        Evaluate the likelihood and its gradient, using GPU if available.
+
+        Parameters
+        ----------
+        params : list of float
+            Parameter vector (length 38)
+        include_prior : bool
+            Whether to include prior terms in the evaluation
+
+        Returns
+        -------
+        tuple of (float, list of float)
+            (likelihood value, gradient vector)
+        )doc")
+    .def("GetGPUEventWeights", &GF::GollumFit::GetGPUEventWeights,
+        "Get per-event weights from the last GPU likelihood evaluation.")
+    .def("GetGPUExpectationHistogram", &GF::GollumFit::GetGPUExpectationHistogram,
+        "Get per-bin expectation histogram from the last GPU evaluation (GPU ordering: [E][Z][T]).")
+#endif
   ;
 
   py::enum_<LW::ParticleType>(m, "ParticleType")

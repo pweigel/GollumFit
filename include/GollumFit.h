@@ -31,6 +31,10 @@
 #include "GollumMCSet.h"
 #include "GollumTools.h"
 
+#ifdef GOLLUMFIT_USE_CUDA
+#include "cuda/GPUFitAccelerator.h"
+#endif
+
 namespace gollumfit{
 
 struct simpleLocalDataWeighter{
@@ -206,6 +210,12 @@ class GollumFit {
 
     // likehood problem object
     std::shared_ptr<LType> prob_;
+
+#ifdef GOLLUMFIT_USE_CUDA
+    // GPU accelerator for likelihood evaluation
+    std::unique_ptr<gpu::GPUFitAccelerator> gpuAccelerator_;
+    bool gpu_acceleration_enabled_ = false;
+#endif
 
     // Nasty template part of fit function
 
@@ -1294,10 +1304,73 @@ class GollumFit {
     * 
     * @param priors The new @c Priors object to set.
     */
-    void SetFitParametersPriors(Priors priors) { 
-      priors_ = priors; 
+    void SetFitParametersPriors(Priors priors) {
+      priors_ = priors;
       priors_constructed_ = true;
     }
+
+#ifdef GOLLUMFIT_USE_CUDA
+    //==========================================================================
+    // GPU Acceleration Methods
+    //==========================================================================
+
+    /**
+     * @brief Enable GPU acceleration for likelihood evaluation.
+     *
+     * This method initializes the GPU accelerator with the current MC events
+     * and histogram configuration. Once enabled, EvalLLH will use the GPU
+     * for computation, providing significant speedups.
+     *
+     * @param deviceId GPU device ID to use (default: 0)
+     * @return true if GPU acceleration was successfully enabled
+     * @throws std::runtime_error If simulation is not loaded or histograms not constructed
+     */
+    bool EnableGPUAcceleration(int deviceId = 0);
+
+    /**
+     * @brief Disable GPU acceleration and fall back to CPU.
+     */
+    void DisableGPUAcceleration();
+
+    /**
+     * @brief Check if GPU acceleration is currently enabled.
+     * @return true if GPU acceleration is enabled and initialized
+     */
+    bool IsGPUAccelerationEnabled() const { return gpu_acceleration_enabled_; }
+
+    /**
+     * @brief Get GPU device information.
+     * @return GPUDeviceInfo struct with device properties, or empty struct if not initialized
+     */
+    gpu::GPUDeviceInfo GetGPUDeviceInfo() const;
+
+    /**
+     * @brief Get timing statistics from the last GPU likelihood evaluation.
+     * @return TimingStats struct with breakdown of GPU operation times
+     */
+    gpu::GPUFitAccelerator::TimingStats GetGPUTimingStats() const;
+
+    /**
+     * @brief Evaluate the likelihood and its gradient, using GPU if available.
+     * @param params Parameter vector
+     * @param include_prior Whether to include prior terms
+     * @return Pair of (likelihood value, gradient vector)
+     */
+    std::pair<double, std::vector<double>> EvalLLHWithGradient(
+        std::vector<double> params, bool include_prior) const;
+
+    /**
+     * @brief Get per-event weights from last GPU likelihood evaluation.
+     * @return Vector of per-event weights [numEvents]
+     */
+    std::vector<double> GetGPUEventWeights() const;
+
+    /**
+     * @brief Get per-bin expectation histogram from last GPU evaluation.
+     * @return Vector of per-bin expected counts [totalBins], in GPU ordering [E][Z][T]
+     */
+    std::vector<double> GetGPUExpectationHistogram() const;
+#endif
 
 };
 
