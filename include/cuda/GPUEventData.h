@@ -45,8 +45,9 @@ class GPUEventDataManager;
  *
  * Memory layout (for N events):
  * - Primary physics fields use float (4 bytes) for most reconstructed quantities
- * - Cached weights use double (8 bytes) to maintain numerical precision
- * - Total memory per event: ~320 bytes (comparable to CPU AoS)
+ * - Cached flux weights and detector corrections use double (8 bytes)
+ * - Cached spline basis use float (4 bytes)
+ * - Total memory per event: ~272 bytes
  */
 struct GPUEventDataSoA {
     //--------------------------------------------------------------------------
@@ -147,6 +148,44 @@ struct GPUEventDataSoA {
     float* cachedIceGrad6;     ///< Ice gradient parameter 6 [N]
     float* cachedIceGrad7;     ///< Ice gradient parameter 7 [N]
     float* cachedIceGrad8;     ///< Ice gradient parameter 8 [N]
+
+    //--------------------------------------------------------------------------
+    // Precomputed transcendentals (computed once, used every kernel call)
+    //--------------------------------------------------------------------------
+
+    double* log10Energy;          ///< log10((double)energy) [N]
+    double* cosZenith;            ///< cos((double)zenith) [N]
+    double* log10PrimaryEnergy;   ///< log10((double)primaryEnergy) [N]
+    double* cosPrimaryZenith;     ///< cos((double)primaryZenith) [N]
+
+    //--------------------------------------------------------------------------
+    // Cached spline basis for dims 0 & 1 — DOM efficiency
+    // Assumes order <= 2 for dims 0 & 1 (3 non-zero basis functions)
+    //--------------------------------------------------------------------------
+
+    int32_t* cachedDOMEffSpan0;   ///< Knot span for dim 0; -1 if OOB [N]
+    int32_t* cachedDOMEffSpan1;   ///< Knot span for dim 1; -1 if OOB [N]
+    // MIXED PRECISION: Using float (FP32) — basis values in [0,1]
+    float*   cachedDOMEffBasis00; ///< basis0[0] for all events [N]
+    float*   cachedDOMEffBasis01; ///< basis0[1] [N]
+    float*   cachedDOMEffBasis02; ///< basis0[2] [N]
+    float*   cachedDOMEffBasis10; ///< basis1[0] [N]
+    float*   cachedDOMEffBasis11; ///< basis1[1] [N]
+    float*   cachedDOMEffBasis12; ///< basis1[2] [N]
+
+    //--------------------------------------------------------------------------
+    // Cached spline basis for dims 0 & 1 — Hole ice (same layout)
+    //--------------------------------------------------------------------------
+
+    int32_t* cachedHoleIceSpan0;   ///< Knot span for dim 0; -1 if OOB [N]
+    int32_t* cachedHoleIceSpan1;   ///< Knot span for dim 1; -1 if OOB [N]
+    // MIXED PRECISION: Using float (FP32) — basis values in [0,1]
+    float*   cachedHoleIceBasis00; ///< basis0[0] for all events [N]
+    float*   cachedHoleIceBasis01; ///< basis0[1] [N]
+    float*   cachedHoleIceBasis02; ///< basis0[2] [N]
+    float*   cachedHoleIceBasis10; ///< basis1[0] [N]
+    float*   cachedHoleIceBasis11; ///< basis1[1] [N]
+    float*   cachedHoleIceBasis12; ///< basis1[2] [N]
 
     //--------------------------------------------------------------------------
     // Precomputed bin indices for histogram accumulation

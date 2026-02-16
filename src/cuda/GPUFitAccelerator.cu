@@ -116,6 +116,14 @@ extern void launchEventWeightGradientKernel(
     cudaStream_t stream
 );
 
+// From precompute_reference_splines.cu
+extern void launchPrecomputeReferenceSplines(
+    GPUEventDataSoA& events,
+    const GPUSplineLookup& splines,
+    int numEvents,
+    cudaStream_t stream
+);
+
 //==============================================================================
 // GPUFitAccelerator Implementation
 //==============================================================================
@@ -441,8 +449,32 @@ void GPUFitAccelerator::buildSplineLookup() {
     splineLookup_.domEffReference = 1.27;
     splineLookup_.holeIceReference = -1.0;
 
+    // Enable basis caching for DOM eff / hole ice splines
+    // (all share the same knot vectors for dims 0 & 1)
+    splineLookup_.basisCacheValid = splineLookup_.hasSplines;
+    basisCacheValid_ = splineLookup_.basisCacheValid;
+
     if (splineLookup_.hasSplines) {
         std::cout << "  GPU spline lookup built successfully" << std::endl;
+    }
+}
+
+void GPUFitAccelerator::precomputeReferenceSplines() {
+    if (!initialized_ || !eventManager_) return;
+
+    GPUEventDataSoA& events = eventManager_->getDeviceData();
+    int numEvents = static_cast<int>(eventManager_->getNumEvents());
+
+    cudaStream_t stream = streams_.empty() ? nullptr : streams_[0].get();
+
+    launchPrecomputeReferenceSplines(events, splineLookup_, numEvents, stream);
+
+    if (basisCacheValid_) {
+        std::cout << "  Precomputed reference spline values for " << numEvents
+                  << " events (basis cache enabled)" << std::endl;
+    } else {
+        std::cout << "  Precomputed reference spline values for " << numEvents
+                  << " events" << std::endl;
     }
 }
 

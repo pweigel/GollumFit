@@ -242,6 +242,18 @@ public:
      */
     void buildSplineLookup();
 
+    /**
+     * @brief Precompute reference spline evaluations for all events.
+     *
+     * Evaluates DOM efficiency and hole ice splines at their fixed reference
+     * values (1.27 and -1.0 respectively) for each event's (log10Energy, cosZenith).
+     * Results are cached in the GPUEventDataSoA fields (cachedDOMEff*, cachedHoleIce*)
+     * so that the weight and gradient kernels can skip these 6 evaluations per event.
+     *
+     * Must be called after buildSplineLookup(). Only needs to be called once.
+     */
+    void precomputeReferenceSplines();
+
     //==========================================================================
     // Likelihood Evaluation
     //==========================================================================
@@ -412,6 +424,9 @@ private:
 
     // Spline lookup for kernels
     GPUSplineLookup splineLookup_;
+
+    // Whether cached basis is valid (all DOM eff / hole ice splines share knots for dims 0&1)
+    bool basisCacheValid_ = false;
 
     // Internal helper methods
     void allocateDeviceMemory();

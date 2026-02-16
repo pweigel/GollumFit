@@ -136,6 +136,32 @@ void GPUEventDataManager::allocate(size_t numEvents) {
     allocateArray(deviceData_.cachedIceGrad7, numEvents);
     allocateArray(deviceData_.cachedIceGrad8, numEvents);
 
+    // Allocate precomputed transcendentals (double)
+    allocateArray(deviceData_.log10Energy, numEvents);
+    allocateArray(deviceData_.cosZenith, numEvents);
+    allocateArray(deviceData_.log10PrimaryEnergy, numEvents);
+    allocateArray(deviceData_.cosPrimaryZenith, numEvents);
+
+    // Allocate cached spline basis — DOM efficiency
+    allocateArray(deviceData_.cachedDOMEffSpan0, numEvents);
+    allocateArray(deviceData_.cachedDOMEffSpan1, numEvents);
+    allocateArray(deviceData_.cachedDOMEffBasis00, numEvents);
+    allocateArray(deviceData_.cachedDOMEffBasis01, numEvents);
+    allocateArray(deviceData_.cachedDOMEffBasis02, numEvents);
+    allocateArray(deviceData_.cachedDOMEffBasis10, numEvents);
+    allocateArray(deviceData_.cachedDOMEffBasis11, numEvents);
+    allocateArray(deviceData_.cachedDOMEffBasis12, numEvents);
+
+    // Allocate cached spline basis — Hole ice
+    allocateArray(deviceData_.cachedHoleIceSpan0, numEvents);
+    allocateArray(deviceData_.cachedHoleIceSpan1, numEvents);
+    allocateArray(deviceData_.cachedHoleIceBasis00, numEvents);
+    allocateArray(deviceData_.cachedHoleIceBasis01, numEvents);
+    allocateArray(deviceData_.cachedHoleIceBasis02, numEvents);
+    allocateArray(deviceData_.cachedHoleIceBasis10, numEvents);
+    allocateArray(deviceData_.cachedHoleIceBasis11, numEvents);
+    allocateArray(deviceData_.cachedHoleIceBasis12, numEvents);
+
     // Allocate bin index array
     allocateArray(deviceData_.binIndex, numEvents);
 
@@ -212,6 +238,32 @@ void GPUEventDataManager::deallocate() {
     freeArray(deviceData_.cachedIceGrad6);
     freeArray(deviceData_.cachedIceGrad7);
     freeArray(deviceData_.cachedIceGrad8);
+
+    // Free precomputed transcendentals
+    freeArray(deviceData_.log10Energy);
+    freeArray(deviceData_.cosZenith);
+    freeArray(deviceData_.log10PrimaryEnergy);
+    freeArray(deviceData_.cosPrimaryZenith);
+
+    // Free cached spline basis — DOM efficiency
+    freeArray(deviceData_.cachedDOMEffSpan0);
+    freeArray(deviceData_.cachedDOMEffSpan1);
+    freeArray(deviceData_.cachedDOMEffBasis00);
+    freeArray(deviceData_.cachedDOMEffBasis01);
+    freeArray(deviceData_.cachedDOMEffBasis02);
+    freeArray(deviceData_.cachedDOMEffBasis10);
+    freeArray(deviceData_.cachedDOMEffBasis11);
+    freeArray(deviceData_.cachedDOMEffBasis12);
+
+    // Free cached spline basis — Hole ice
+    freeArray(deviceData_.cachedHoleIceSpan0);
+    freeArray(deviceData_.cachedHoleIceSpan1);
+    freeArray(deviceData_.cachedHoleIceBasis00);
+    freeArray(deviceData_.cachedHoleIceBasis01);
+    freeArray(deviceData_.cachedHoleIceBasis02);
+    freeArray(deviceData_.cachedHoleIceBasis10);
+    freeArray(deviceData_.cachedHoleIceBasis11);
+    freeArray(deviceData_.cachedHoleIceBasis12);
 
     // Free bin index array
     freeArray(deviceData_.binIndex);
@@ -534,6 +586,13 @@ size_t GPUEventDataManager::getMemoryUsage() const {
     // Atmospheric: 2
     // Ice gradients: 9
     usage += 27 * numEvents_ * sizeof(float);
+
+    // Precomputed transcendentals (4 double arrays)
+    usage += 4 * numEvents_ * sizeof(double);
+
+    // Cached spline basis: 2 types × (2 int32 spans + 6 float basis) = 4 int32 + 12 float
+    usage += 4 * numEvents_ * sizeof(int32_t);
+    usage += 12 * numEvents_ * sizeof(float);
 
     // Bin index
     usage += numEvents_ * sizeof(int32_t);

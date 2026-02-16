@@ -196,6 +196,9 @@ struct GPUSplineLookup {
     // Flag to indicate if splines are available
     bool hasSplines;
 
+    // Whether cached basis is valid (all DOM eff / hole ice splines share knots for dims 0&1)
+    bool basisCacheValid;
+
     /**
      * @brief Initialize all pointers to nullptr
      */
@@ -212,6 +215,7 @@ struct GPUSplineLookup {
         domEffReference = 1.27;
         holeIceReference = -1.0;
         hasSplines = false;
+        basisCacheValid = false;
     }
 };
 

@@ -1560,6 +1560,11 @@ bool GollumFit::EnableGPUAcceleration(int deviceId) {
     // Build spline lookup table for kernel access
     gpuAccelerator_->buildSplineLookup();
 
+    // Precompute reference spline evaluations (DOM eff and hole ice at reference values)
+    // These are constant per event and only depend on log10(energy) and cos(zenith).
+    // Caching them avoids 6 redundant spline evaluations per event on every LLH call.
+    gpuAccelerator_->precomputeReferenceSplines();
+
     // Upload data histogram
     // dataHist has shape [topology][zenith][energy] (extent(0)=topo, extent(1)=zenith, extent(2)=energy)
     // GPU bin index layout is [energy][zenith][topology]:

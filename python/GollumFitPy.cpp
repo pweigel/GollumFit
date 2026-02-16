@@ -548,6 +548,23 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def("GetExpectationEvents",(nsq::marray<double,2>(GF::GollumFit::*)(GF::FitParameters)const)&GF::GollumFit::GetExpectationEvents)
     .def("CheckExpectation",(int(GF::GollumFit::*)(GF::FitParameters)const)&GF::GollumFit::CheckExpectation)
     .def("EvalLLH",(double(GF::GollumFit::*)(GF::FitParameters,bool)const)&GF::GollumFit::EvalLLH)
+    .def("EvalLLHVec", [](const GF::GollumFit& self, std::vector<double> params, bool include_prior) {
+        py::gil_scoped_release release;
+        return self.EvalLLH(std::move(params), include_prior);
+    }, py::arg("params"), py::arg("include_prior"),
+    R"doc(
+    Evaluate the log-likelihood from a parameter vector (length 38).
+
+    Skips FitParameters struct conversion and releases the Python GIL
+    during GPU computation. Use this for tight sampling loops.
+
+    Parameters
+    ----------
+    params : list of float
+        Parameter vector in ConvertFitParameters order (length 38)
+    include_prior : bool
+        Whether to include prior terms
+    )doc")
     .def("SetData", &GF::GollumFit::SetData)
     .def("MinLLH",(GF::FitResult(GF::GollumFit::*)() const)&GF::GollumFit::MinLLH)
     .def("SetFitParametersSeed",(void(GF::GollumFit::*)(std::vector<GF::FitParameters>))&GF::GollumFit::SetFitParametersSeed)
