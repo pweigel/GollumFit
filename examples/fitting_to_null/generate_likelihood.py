@@ -61,8 +61,8 @@ syst_dict     = {
     'nuxs'                      : [ False, 'Gaussian',      1.,   0.1,                 0.824,                1.176 ], 
     'nubarxs'                   : [ False, 'Gaussian',      1.,   0.1,                 0.824,                1.176 ], 
     'astroPivot'                : [ False,  'Uniform',      5.,    1.,                    4.,                   6. ], 
-    'promptNorm'                : [ False, 'Gaussian',      1.,    1.,                    0.,                   3. ],
-    'NeutrinoAntineutrinoRatio' : [ False, 'Gaussian',      1.,    1.,                    0.,                   2. ],
+    'promptNorm'                : [ True, 'Gaussian',      1.,    1.,                    0.,                   3. ],
+    'NeutrinoAntineutrinoRatio' : [ True, 'Gaussian',      1.,    1.,                    0.,                   2. ],
 }
 
 #####################################################################################
@@ -89,7 +89,7 @@ def throw(syst):
 # Create objects to manage fit configuration
 #####################################################################################
 
-fitparams_flag  = gf.FitParametersFlag()  # Which parameters to vary
+fitparams_flag  = gf.FitParametersFlag(False)  # Which parameters to vary (False = vary)
 fitparams_bound = gf.FitParametersBound()  # Parameter bounds
 priors          = gf.Priors()              # Prior distributions
 seed_fitparams  = gf.FitParameters()       # Initial values
@@ -127,7 +127,7 @@ for sname in syst_dict.keys():
 gollumdir = "../../gollumfit-release"
 
 # Set correlations (required for fitting/minimization, not for likelihood evaluation)
-iceg_corr = np.load('../../resources/IceGradientsMaker/icegrad_correlations.npy')
+iceg_corr = np.load('../../resources/correlation_matrices/icegrad_correlations.npy')
 flux_corr = np.load('../../resources/DDMFluxMaker/flux_correlations_new_ddmnodeis.npy')
 for idx, val in np.ndenumerate(iceg_corr):
     priors.SetIceGradientsCorr(idx[0], idx[1], val)
@@ -138,7 +138,7 @@ datapaths = gf.DataPaths()
 datapaths.domeff_spline_path      = "../../resources/Splines/DOMEffSplines/new_ddmnodeis/BDT/DnnEnergy_0.99"
 datapaths.holeice_spline_path     = "../../resources/Splines/HoleIceSplines/new_ddmnodeis/BDT/DnnEnergy_0.99"
 datapaths.attenuation_spline_path = "../../resources/Splines/AttenuationSplines/new_ddmnodeis"
-datapaths.compact_file_path       = "../FastMC/example.fastmc"
+datapaths.compact_file_path       = "../FastMC/null.fastmc"
 
 #####################################################################################
 # Configure Steering Parameters

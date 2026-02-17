@@ -411,6 +411,9 @@ private:
     DevicePtr<double> d_gradient_;         // [NUM_FIT_PARAMS] gradient accumulator
     PinnedPtr<double> h_gradient_;         // [NUM_FIT_PARAMS] pinned host copy
 
+    // Gradient intermediate buffer (per-event cached scalars for analytic derivatives)
+    DevicePtr<double> d_gradIntermediate_; // [26 * numEvents]
+
     // Host copies of prior config for CPU gradient computation
     std::vector<double> h_priorMeans_;
     std::vector<double> h_priorSigmas_;

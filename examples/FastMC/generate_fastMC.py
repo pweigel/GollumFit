@@ -70,7 +70,7 @@ steering_params.active_cosmicray_parameters     = crlist
 # Livetime for the corresponding Monte Carlo
 years = 10.669
 steering_params.fullLivetime                    = years * 365 * 24 * 60 * 60.
-steering_params.simToLoad                       = "BDT_Split_HE"
+steering_params.simToLoad                       = "BDT_Test_HE_Plus_Tau"
 steering_params.energyName                      = "DnnEnergy"
 steering_params.model_label                     = ""  # Can be used for uniquely-labelled flux files
 

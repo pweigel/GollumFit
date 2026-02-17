@@ -265,6 +265,19 @@ set_target_properties(benchmark_mixed_precision PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
+# Gradient Scaling Benchmark
+add_executable(benchmark_gradient_scaling
+    benchmark_gradient_scaling.cu
+    ${TEST_COMMON_HEADER}
+)
+target_link_libraries(benchmark_gradient_scaling
+    GollumFit
+    CUDA::cudart
+)
+set_target_properties(benchmark_gradient_scaling PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
 #==============================================================================
 # CTest integration
 #==============================================================================

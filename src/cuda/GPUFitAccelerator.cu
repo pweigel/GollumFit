@@ -104,6 +104,9 @@ extern void launchBinSensitivities(
 );
 
 // From event_weighting_gradient.cu
+// Number of intermediate fields per event for gradient computation
+constexpr int GRAD_NUM_INTERMEDIATE_FIELDS = 26;
+
 extern void launchEventWeightGradientKernel(
     const GPUEventDataSoA& events,
     const double* d_params,
@@ -113,6 +116,7 @@ extern void launchEventWeightGradientKernel(
     double* d_gradient,
     int numEvents,
     bool enableTotalNorm,
+    double* d_intermediates,
     cudaStream_t stream
 );
 
@@ -273,6 +277,9 @@ void GPUFitAccelerator::allocateDeviceMemory() {
     d_adjoint_w2sum_ = DevicePtr<double>(totalBins);
     d_gradient_ = DevicePtr<double>(NUM_FIT_PARAMS);
     h_gradient_ = PinnedPtr<double>(NUM_FIT_PARAMS);
+
+    // Allocate gradient intermediate buffer (SoA: 26 doubles per event)
+    d_gradIntermediate_ = DevicePtr<double>(GRAD_NUM_INTERMEDIATE_FIELDS * numEvents);
 
     // Initialize histograms to zero
     CUDA_CHECK(cudaMemset(d_binSums_.get(), 0, totalBins * sizeof(double)));
@@ -717,6 +724,7 @@ void GPUFitAccelerator::computeWeightsWithGradient(cudaStream_t stream) {
         d_gradient_.get(),
         numEvents,
         enableTotalNorm,
+        d_gradIntermediate_.get(),
         stream
     );
 }
