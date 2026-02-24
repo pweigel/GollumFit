@@ -261,6 +261,9 @@ elif which "python3" > /dev/null 2>&1; then
 	PYTHON_EXE="python3"
 fi
 
+ENABLE_CUDA=0
+CUDA_DIR=""
+
 ###################################################################################################
 # help message
 ###################################################################################################
@@ -321,9 +324,13 @@ locations of dependencies:
   --python-bin=PYTHON_EXECUTABLE  	use this python executable
                                  	(default is $PYTHON_EXE)
   --python-module-dir=DIR        	install python module to this directory, rather
-                                 	than the default system location. The special 
+                                 	than the default system location. The special
                                  	value site.USER_SITE will be automatically
                                  	expanded using the python interpreter
+
+  --enable-cuda                  	enable CUDA GPU acceleration
+  --with-cuda=DIR                	use the CUDA toolkit in DIR
+                                 	(default: auto-detect from nvcc or /usr/local/cuda)
 
 Some influential environment variables:
 CC          C compiler command
@@ -434,6 +441,11 @@ do
 	if [ "$TMP" ]; then PYTHON_EXE="${TMP}"; continue; fi
 	TMP=`echo "$var" | sed -n 's/^--python-module-dir=\(.*\)$/\1/p'`
 	if [ "$TMP" ]; then USER_PYTHON_MODULE_DIR="${TMP}"; continue; fi
+
+  # CUDA #
+	if [ "$var" = "--enable-cuda" ]; then ENABLE_CUDA=1; continue; fi
+	TMP=`echo "$var" | sed -n 's/^--with-cuda=\(.*\)$/\1/p'`
+	if [ "$TMP" ]; then CUDA_DIR="$TMP"; ENABLE_CUDA=1; continue; fi
 
   # KILL #
 	echo "config.sh: Unknown or malformed option '$var'" 1>&2
@@ -580,6 +592,50 @@ fi
 # 	echo "*** Failed to find Boost Python; Python bindings will not be built ***"
 # fi
 
+# CUDA detection
+if [ "$ENABLE_CUDA" -eq 1 ]; then
+	echo "Looking for CUDA toolkit..."
+	if [ "$CUDA_DIR" ]; then
+		# User specified --with-cuda=DIR
+		if [ -e "$CUDA_DIR/include/cuda_runtime.h" ]; then
+			CUDA_HOME="$CUDA_DIR"
+		else
+			echo "Error: CUDA not found at $CUDA_DIR" 1>&2
+			exit 1
+		fi
+	else
+		# Auto-detect: try CUDA_HOME env, then nvcc location, then common paths
+		if [ "$CUDA_HOME" ] && [ -e "$CUDA_HOME/include/cuda_runtime.h" ]; then
+			: # use existing CUDA_HOME
+		elif which nvcc > /dev/null 2>&1; then
+			CUDA_HOME=$(dirname $(dirname $(which nvcc)))
+		else
+			for trydir in /usr/local/cuda /opt/cuda; do
+				if [ -e "$trydir/include/cuda_runtime.h" ]; then
+					CUDA_HOME="$trydir"
+					break
+				fi
+			done
+		fi
+	fi
+	if [ "$CUDA_HOME" ] && [ -e "$CUDA_HOME/include/cuda_runtime.h" ]; then
+		NVCC="$CUDA_HOME/bin/nvcc"
+		if [ ! -x "$NVCC" ]; then
+			echo "Error: nvcc not found at $NVCC" 1>&2
+			exit 1
+		fi
+		CUDA_VERSION=`$NVCC --version | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p'`
+		echo " Found CUDA $CUDA_VERSION at $CUDA_HOME"
+		CUDA_FOUND=1
+		CUDA_CFLAGS="-I$CUDA_HOME/include"
+		CUDA_LDFLAGS="-L$CUDA_HOME/lib64 -lcudart"
+	else
+		echo "Error: --enable-cuda was specified but CUDA toolkit not found" 1>&2
+		echo "  Use --with-cuda=DIR to specify the CUDA installation path" 1>&2
+		exit 1
+	fi
+fi
+
 ensure_found squids
 ensure_found nusquids
 ensure_found leptonweighter
@@ -718,6 +774,16 @@ echo "CFITSIO_LDFLAGS=$CFITSIO_LDFLAGS" >> ./Makefile
 echo "HDF5_CFLAGS=$HDF5_CFLAGS" >> ./Makefile
 echo "HDF5_LDFLAGS=$HDF5_LDFLAGS" >> ./Makefile
 
+if [ "$CUDA_FOUND" ]; then
+	echo "" >> ./Makefile
+	echo "# CUDA" >> ./Makefile
+	echo "NVCC=$NVCC" >> ./Makefile
+	echo "CUDA_HOME=$CUDA_HOME" >> ./Makefile
+	echo "CUDA_CFLAGS=$CUDA_CFLAGS -DGOLLUMFIT_USE_CUDA" >> ./Makefile
+	echo "CUDA_LDFLAGS=$CUDA_LDFLAGS" >> ./Makefile
+	echo 'NVCCFLAGS=-std=c++17 -O3 --expt-relaxed-constexpr -DGOLLUMFIT_USE_CUDA "--generate-code=arch=compute_80,code=[compute_80,sm_80]" "--generate-code=arch=compute_86,code=[compute_86,sm_86]" "--generate-code=arch=compute_89,code=[compute_89,sm_89]" "--generate-code=arch=compute_90,code=[compute_90,sm_90]" -Xcompiler=-fPIC -dc' >> ./Makefile
+fi
+
 if [ "$BOOST_PYTHON_FOUND" ]; then
 	echo "PYTHON_CFLAGS=$PYTHON_CFLAGS" >> ./Makefile
 	echo "PYTHON_LDFLAGS=$PYTHON_LDFLAGS" >> ./Makefile
@@ -739,10 +805,10 @@ SRC_GF=$(PATH_GF)/src
 LIB_GF=$(PATH_GF)/lib
 
 # FLAGS
-CXXFLAGS+= -fPIC -I$(INC_GF) $(SQUIDS_CFLAGS) $(NUSQUIDS_CFLAGS) $(LEPTONWEIGHTER_CFLAGS) $(PHYSTOOLS_CFLAGS) $(PHOTOSPLINE_CFLAGS) $(CFITSIO_CFLAGS) $(BOOST_CFLAGS) $(HDF5_CFLAGS)
+CXXFLAGS+= -fPIC -I$(INC_GF) $(SQUIDS_CFLAGS) $(NUSQUIDS_CFLAGS) $(LEPTONWEIGHTER_CFLAGS) $(PHYSTOOLS_CFLAGS) $(PHOTOSPLINE_CFLAGS) $(CFITSIO_CFLAGS) $(BOOST_CFLAGS) $(HDF5_CFLAGS) $(CUDA_CFLAGS)
 
 LDFLAGS= -Wl,-rpath -Wl,$(LIB_GF) -L$(LIB_GF)
-LDFLAGS+= $(NUSQUIDS_LDFLAGS) $(SQUIDS_LDFLAGS) $(LEPTONWEIGHTER_LDFLAGS) $(PHYSTOOLS_LDFLAGS) $(PHOTOSPLINE_LDFLAGS) $(CFITSIO_LDFLAGS) $(BOOST_LDFLAGS) $(HDF5_LDFLAGS)
+LDFLAGS+= $(NUSQUIDS_LDFLAGS) $(SQUIDS_LDFLAGS) $(LEPTONWEIGHTER_LDFLAGS) $(PHYSTOOLS_LDFLAGS) $(PHOTOSPLINE_LDFLAGS) $(CFITSIO_LDFLAGS) $(BOOST_LDFLAGS) $(HDF5_LDFLAGS) $(CUDA_LDFLAGS)
 
 CXXFLAGS+=-I/usr/local/include/
 CXXFLAGS+=-I${PREFIX}/include/
@@ -764,6 +830,34 @@ LDFLAGS+=-lSQuIDS -lnuSQuIDS
 LDFLAGS+=-lLeptonWeighter
 
 GOLLUM_HELPER_OBJECTS = Event.o analysisWeighting.o utils.o compactIO.o GollumFit.o GollumParameters.o GollumTools.o GollumEnumDefinitions.o
+' >> ./Makefile
+
+# Add CUDA objects to the list before library linking rules
+if [ "$CUDA_FOUND" ]; then
+	echo '
+CUDA_OBJECTS = $(LIB_GF)/GPUFitAccelerator.o \
+               $(LIB_GF)/GPUDataTransfer.o \
+               $(LIB_GF)/GPUSplineTable.o \
+               $(LIB_GF)/event_weighting.o \
+               $(LIB_GF)/histogram_reduction.o \
+               $(LIB_GF)/likelihood.o \
+               $(LIB_GF)/bin_sensitivity.o \
+               $(LIB_GF)/event_weighting_gradient.o \
+               $(LIB_GF)/precompute_reference_splines.o
+
+CUDA_HEADERS = $(INC_GF)/cuda/GPUEventData.h \
+               $(INC_GF)/cuda/GPUEventDataPacked.h \
+               $(INC_GF)/cuda/GPUFitAccelerator.h \
+               $(INC_GF)/cuda/GPUSplineTable.h \
+               $(INC_GF)/cuda/GPUCommon.h
+
+NVCC_INC = -I$(INC_GF) -I$(CUDA_HOME)/include $(filter -I% -D%,$(SQUIDS_CFLAGS) $(NUSQUIDS_CFLAGS) $(LEPTONWEIGHTER_CFLAGS) $(PHYSTOOLS_CFLAGS) $(PHOTOSPLINE_CFLAGS) $(CFITSIO_CFLAGS) $(BOOST_CFLAGS) $(HDF5_CFLAGS)) -I/usr/local/include/ -I$(PREFIX)/include/
+
+DEVICE_LINK_OBJ = $(LIB_GF)/device_link.o
+' >> ./Makefile
+fi
+
+echo '
 
 OS_NAME=$(shell uname -s)
 
@@ -782,7 +876,7 @@ NAME=GollumFit
 VERSION=1.0.0
 STAT_PRODUCT:=$(LIB_GF)/lib$(NAME).a
 DYN_PRODUCT:=$(LIB_GF)/lib$(NAME)$(DYN_SUFFIX)
-OBJECTS = $(addprefix $(LIB_GF)/, $(GOLLUM_HELPER_OBJECTS))
+OBJECTS = $(addprefix $(LIB_GF)/, $(GOLLUM_HELPER_OBJECTS)) $(CUDA_OBJECTS) $(DEVICE_LINK_OBJ)
 
 # Compilation rules
 all: $(STAT_PRODUCT) $(DYN_PRODUCT)
@@ -837,6 +931,54 @@ install: $(DYN_PRODUCT) $(STAT_PRODUCT)
 	@mkdir -p $(PREFIX)/lib/pkgconfig
 	@cp lib/gollumfit.pc $(PREFIX)/lib/pkgconfig
 ' >> ./Makefile
+
+# Add CUDA install step
+if [ "$CUDA_FOUND" ]; then
+	# Append to the install target
+	echo '
+install: install-cuda-headers
+install-cuda-headers:
+	@mkdir -p $(PREFIX)/include/GollumFit/cuda
+	@cp $(INC_GF)/cuda/*.h $(PREFIX)/include/GollumFit/cuda/
+' >> ./Makefile
+fi
+
+# Add CUDA build rules if enabled
+if [ "$CUDA_FOUND" ]; then
+	echo '
+# CUDA compilation rules
+$(LIB_GF)/GPUFitAccelerator.o : $(SRC_GF)/cuda/GPUFitAccelerator.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/GPUDataTransfer.o : $(SRC_GF)/cuda/GPUDataTransfer.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/GPUSplineTable.o : $(SRC_GF)/cuda/GPUSplineTable.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/event_weighting.o : $(SRC_GF)/cuda/kernels/event_weighting.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/histogram_reduction.o : $(SRC_GF)/cuda/kernels/histogram_reduction.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/likelihood.o : $(SRC_GF)/cuda/kernels/likelihood.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/bin_sensitivity.o : $(SRC_GF)/cuda/kernels/bin_sensitivity.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/event_weighting_gradient.o : $(SRC_GF)/cuda/kernels/event_weighting_gradient.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+$(LIB_GF)/precompute_reference_splines.o : $(SRC_GF)/cuda/kernels/precompute_reference_splines.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCCFLAGS) $(NVCC_INC) -c $< -o $@
+
+# CUDA device linking (NVCCFLAGS without -dc)
+$(LIB_GF)/device_link.o : $(CUDA_OBJECTS)
+	$(NVCC) $(filter-out -dc,$(NVCCFLAGS)) -dlink $^ -o $@ -lcudart
+' >> ./Makefile
+fi
 
 echo '
 uninstall:
