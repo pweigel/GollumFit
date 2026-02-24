@@ -273,6 +273,69 @@ __device__ __forceinline__ double computeDOMEffCorrection(
 }
 
 /**
+ * @brief Compute DOM efficiency correction using cached spline basis
+ *
+ * Uses precomputed span + basis for dims 0&1 and precomputed reference value
+ * to skip redundant spline evaluations.
+ *
+ * @param spline Pointer to the DOM efficiency spline for this flux/topology
+ * @param span0 Cached knot span for dim 0
+ * @param span1 Cached knot span for dim 1
+ * @param basis0 3 cached FP32 basis values for dim 0
+ * @param basis1 3 cached FP32 basis values for dim 1
+ * @param domEfficiency Current DOM efficiency parameter value
+ * @param cachedRefValue Precomputed reference evaluation (from precomputeReferenceSplines)
+ * @return Correction factor, or 0.0 if out of parameter space, or 1.0 if no spline
+ */
+__device__ __forceinline__ double computeDOMEffCorrectionCached(
+    const GPUSplineTable* spline,
+    int span0, int span1,
+    const float* basis0, const float* basis1,
+    double domEfficiency,
+    double cachedRefValue
+) {
+    if (spline == nullptr) return 1.0;
+    if (span0 < 0) return 0.0;  // OOB sentinel from precompute
+
+    double rate = evaluateSpline3DCached(*spline, span0, span1, basis0, basis1, domEfficiency);
+    if (rate == 0.0) return 0.0;
+    if (cachedRefValue == 0.0) return 0.0;
+
+    return exp2((rate - cachedRefValue) * LOG2_10);
+}
+
+/**
+ * @brief Compute hole ice correction using cached spline basis
+ *
+ * Uses precomputed span + basis for dims 0&1 and precomputed reference value.
+ *
+ * @param spline Pointer to the hole ice spline for this flux/topology
+ * @param span0 Cached knot span for dim 0
+ * @param span1 Cached knot span for dim 1
+ * @param basis0 3 cached FP32 basis values for dim 0
+ * @param basis1 3 cached FP32 basis values for dim 1
+ * @param holeiceForward Current hole ice forward parameter value
+ * @param cachedRefValue Precomputed reference evaluation (from precomputeReferenceSplines)
+ * @return Correction factor, or 0.0 if out of parameter space, or 1.0 if no spline
+ */
+__device__ __forceinline__ double computeHoleIceCorrectionCached(
+    const GPUSplineTable* spline,
+    int span0, int span1,
+    const float* basis0, const float* basis1,
+    double holeiceForward,
+    double cachedRefValue
+) {
+    if (spline == nullptr) return 1.0;
+    if (span0 < 0) return 0.0;  // OOB sentinel from precompute
+
+    double rate = evaluateSpline3DCached(*spline, span0, span1, basis0, basis1, holeiceForward);
+    if (rate == 0.0) return 0.0;
+    if (cachedRefValue == 0.0) return 0.0;
+
+    return exp2((rate - cachedRefValue) * LOG2_10);
+}
+
+/**
  * @brief Compute hole ice correction using spline evaluation
  *
  * Matches holeiceWeighter from analysisWeighting.h:640-672:
@@ -338,7 +401,7 @@ __device__ __forceinline__ double computeHoleIceCorrection(
  * @param numEvents Total number of events
  * @param enableTotalNorm Steering parameter for normalization mode
  */
-__global__ void computeEventWeightsKernel(
+__global__ __launch_bounds__(256, 2) void computeEventWeightsKernel(
     const GPUEventDataSoA events,
     const double* __restrict__ params,
     const GPUSplineLookup splines,
@@ -371,10 +434,7 @@ __global__ void computeEventWeightsKernel(
     // Load event data (coalesced reads from SoA)
     //--------------------------------------------------------------------------
 
-    const float energy = events.energy[tid];
-    const float zenith = events.zenith[tid];
     const float primaryEnergy = events.primaryEnergy[tid];
-    const float primaryZenith = events.primaryZenith[tid];
     const int32_t primaryType = events.primaryType[tid];
     const uint32_t topology = events.topology[tid];
 
@@ -403,9 +463,9 @@ __global__ void computeEventWeightsKernel(
     // Compute spline-based corrections
     //--------------------------------------------------------------------------
 
-    // Precompute coordinates for spline evaluation
-    const double log10Energy = log10((double)energy);
-    const double cosZenith = cos((double)zenith);
+    // Use precomputed transcendentals (computed once at upload time)
+    const double log10Energy = events.log10Energy[tid];
+    const double cosZenith = events.cosZenith[tid];
 
     // Get current parameter values
     const double domEfficiency = s_params[P_DELTA_DOMEFF];
@@ -415,12 +475,63 @@ __global__ void computeEventWeightsKernel(
     const int topoIdx = (topology < GPU_NUM_TOPOLOGIES) ? topology : 0;
 
     // Compute DOM efficiency corrections for each flux component
-    // Pass reference value from splines struct (CPU re-evaluates at reference every time)
     double convDOMEff = 1.0;
     double promptDOMEff = 1.0;
     double astroDOMEff = 1.0;
 
-    if (splines.hasSplines) {
+    // Compute hole ice corrections for each flux component
+    double convHoleIce = 1.0;
+    double promptHoleIce = 1.0;
+    double astroHoleIce = 1.0;
+
+    if (splines.hasSplines && splines.basisCacheValid) {
+        // Load cached spline basis for DOM eff
+        const int domEffSpan0 = events.cachedDOMEffSpan0[tid];
+        const int domEffSpan1 = events.cachedDOMEffSpan1[tid];
+        float domEffBasis0[3] = {events.cachedDOMEffBasis00[tid], events.cachedDOMEffBasis01[tid], events.cachedDOMEffBasis02[tid]};
+        float domEffBasis1[3] = {events.cachedDOMEffBasis10[tid], events.cachedDOMEffBasis11[tid], events.cachedDOMEffBasis12[tid]};
+
+        // Load cached spline basis for hole ice
+        const int holeIceSpan0 = events.cachedHoleIceSpan0[tid];
+        const int holeIceSpan1 = events.cachedHoleIceSpan1[tid];
+        float holeIceBasis0[3] = {events.cachedHoleIceBasis00[tid], events.cachedHoleIceBasis01[tid], events.cachedHoleIceBasis02[tid]};
+        float holeIceBasis1[3] = {events.cachedHoleIceBasis10[tid], events.cachedHoleIceBasis11[tid], events.cachedHoleIceBasis12[tid]};
+
+        // Load cached reference spline values
+        const double cachedRefDOMEffConv = events.cachedDOMEffConv[tid];
+        const double cachedRefDOMEffPrompt = events.cachedDOMEffPrompt[tid];
+        const double cachedRefDOMEffAstro = events.cachedDOMEffAstro[tid];
+        const double cachedRefHoleIceConv = events.cachedHoleIceConv[tid];
+        const double cachedRefHoleIcePrompt = events.cachedHoleIcePrompt[tid];
+        const double cachedRefHoleIceAstro = events.cachedHoleIceAstro[tid];
+
+        convDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_CONV][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffConv);
+        promptDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_PROMPT][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffPrompt);
+        astroDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_ASTRO][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffAstro);
+
+        convHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_CONV][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIceConv);
+        promptHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_PROMPT][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIcePrompt);
+        astroHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_ASTRO][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIceAstro);
+    } else if (splines.hasSplines) {
+        // Fallback: original full evaluation
         convDOMEff = computeDOMEffCorrection(
             splines.domEffSplines[GPU_FLUX_CONV][topoIdx],
             log10Energy, cosZenith, domEfficiency, splines.domEffReference);
@@ -430,14 +541,7 @@ __global__ void computeEventWeightsKernel(
         astroDOMEff = computeDOMEffCorrection(
             splines.domEffSplines[GPU_FLUX_ASTRO][topoIdx],
             log10Energy, cosZenith, domEfficiency, splines.domEffReference);
-    }
 
-    // Compute hole ice corrections for each flux component
-    double convHoleIce = 1.0;
-    double promptHoleIce = 1.0;
-    double astroHoleIce = 1.0;
-
-    if (splines.hasSplines) {
         convHoleIce = computeHoleIceCorrection(
             splines.holeIceSplines[GPU_FLUX_CONV][topoIdx],
             log10Energy, cosZenith, holeiceForward, splines.holeIceReference);
@@ -460,13 +564,13 @@ __global__ void computeEventWeightsKernel(
     double astroAtt = 1.0;
 
     if (splines.hasSplines) {
-        const double cosPrimaryZenith = cos((double)primaryZenith);
+        const double cosPrimaryZenith = events.cosPrimaryZenith[tid];
         if (cosPrimaryZenith <= 0.1) {
             int ptypeIdx = mapParticleTypeToGPU(primaryType);
             if (ptypeIdx >= 0) {
                 // Select scale: neutrino (positive type) uses nuxs, anti uses nubarxs
                 double scale = (primaryType > 0) ? s_params[P_NUXS] : s_params[P_NUBARXS];
-                double log10PrimaryEnergy = log10((double)primaryEnergy);
+                const double log10PrimaryEnergy = events.log10PrimaryEnergy[tid];
 
                 const GPUSplineTable* convAttenSpline = splines.attenSplines[GPU_FLUX_CONV][ptypeIdx];
                 if (convAttenSpline != nullptr) {
@@ -597,7 +701,7 @@ void launchEventWeightingKernel(
  * This is a variant that computes w^2 / num_events for each event,
  * which is needed for the SAY likelihood MC uncertainty term.
  */
-__global__ void computeEventWeightsSquaredKernel(
+__global__ __launch_bounds__(256, 2) void computeEventWeightsSquaredKernel(
     const GPUEventDataSoA events,
     const double* __restrict__ params,
     const GPUSplineLookup splines,
@@ -622,10 +726,7 @@ __global__ void computeEventWeightsSquaredKernel(
     if (tid >= numEvents) return;
 
     // Load event data
-    const float energy = events.energy[tid];
-    const float zenith = events.zenith[tid];
     const float primaryEnergy = events.primaryEnergy[tid];
-    const float primaryZenith = events.primaryZenith[tid];
     const int32_t primaryType = events.primaryType[tid];
     const int32_t numEventsInBin = events.numEvents[tid];
     const uint32_t topology = events.topology[tid];
@@ -650,9 +751,9 @@ __global__ void computeEventWeightsSquaredKernel(
     cachedIceGrads[7] = events.cachedIceGrad7[tid];
     cachedIceGrads[8] = events.cachedIceGrad8[tid];
 
-    // Compute spline corrections
-    const double log10Energy = log10((double)energy);
-    const double cosZenith = cos((double)zenith);
+    // Use precomputed transcendentals
+    const double log10Energy = events.log10Energy[tid];
+    const double cosZenith = events.cosZenith[tid];
     const double domEfficiency = s_params[P_DELTA_DOMEFF];
     const double holeiceForward = s_params[P_HOLEICE_FWD];
     const int topoIdx = (topology < GPU_NUM_TOPOLOGIES) ? topology : 0;
@@ -660,7 +761,54 @@ __global__ void computeEventWeightsSquaredKernel(
     double convDOMEff = 1.0, promptDOMEff = 1.0, astroDOMEff = 1.0;
     double convHoleIce = 1.0, promptHoleIce = 1.0, astroHoleIce = 1.0;
 
-    if (splines.hasSplines) {
+    if (splines.hasSplines && splines.basisCacheValid) {
+        // Load cached spline basis for DOM eff
+        const int domEffSpan0 = events.cachedDOMEffSpan0[tid];
+        const int domEffSpan1 = events.cachedDOMEffSpan1[tid];
+        float domEffBasis0[3] = {events.cachedDOMEffBasis00[tid], events.cachedDOMEffBasis01[tid], events.cachedDOMEffBasis02[tid]};
+        float domEffBasis1[3] = {events.cachedDOMEffBasis10[tid], events.cachedDOMEffBasis11[tid], events.cachedDOMEffBasis12[tid]};
+
+        // Load cached spline basis for hole ice
+        const int holeIceSpan0 = events.cachedHoleIceSpan0[tid];
+        const int holeIceSpan1 = events.cachedHoleIceSpan1[tid];
+        float holeIceBasis0[3] = {events.cachedHoleIceBasis00[tid], events.cachedHoleIceBasis01[tid], events.cachedHoleIceBasis02[tid]};
+        float holeIceBasis1[3] = {events.cachedHoleIceBasis10[tid], events.cachedHoleIceBasis11[tid], events.cachedHoleIceBasis12[tid]};
+
+        // Load cached reference spline values
+        const double cachedRefDOMEffConv = events.cachedDOMEffConv[tid];
+        const double cachedRefDOMEffPrompt = events.cachedDOMEffPrompt[tid];
+        const double cachedRefDOMEffAstro = events.cachedDOMEffAstro[tid];
+        const double cachedRefHoleIceConv = events.cachedHoleIceConv[tid];
+        const double cachedRefHoleIcePrompt = events.cachedHoleIcePrompt[tid];
+        const double cachedRefHoleIceAstro = events.cachedHoleIceAstro[tid];
+
+        convDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_CONV][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffConv);
+        promptDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_PROMPT][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffPrompt);
+        astroDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_ASTRO][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffAstro);
+
+        convHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_CONV][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIceConv);
+        promptHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_PROMPT][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIcePrompt);
+        astroHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_ASTRO][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIceAstro);
+    } else if (splines.hasSplines) {
+        // Fallback: original full evaluation
         convDOMEff = computeDOMEffCorrection(
             splines.domEffSplines[GPU_FLUX_CONV][topoIdx],
             log10Energy, cosZenith, domEfficiency, splines.domEffReference);
@@ -686,16 +834,14 @@ __global__ void computeEventWeightsSquaredKernel(
     double convAtt = 1.0, promptAtt = 1.0, astroAtt = 1.0;
 
     if (splines.hasSplines) {
-        const double cosPrimaryZenith = cos((double)primaryZenith);
+        const double cosPrimaryZenith = events.cosPrimaryZenith[tid];
         if (cosPrimaryZenith <= 0.1) {
             int ptypeIdx = mapParticleTypeToGPU(primaryType);
             if (ptypeIdx >= 0) {
                 double scale = (primaryType > 0) ? s_params[P_NUXS] : s_params[P_NUBARXS];
-                double log10PrimaryEnergy = log10((double)primaryEnergy);
+                const double log10PrimaryEnergy = events.log10PrimaryEnergy[tid];
 
                 const GPUSplineTable* s;
-                // OOB coordinates → evaluateSpline3D returns 0 → correction=0 → weight=0
-                // This matches CPU photospline behavior where OOB returns 0
                 s = splines.attenSplines[GPU_FLUX_CONV][ptypeIdx];
                 if (s != nullptr) { convAtt = evaluateSpline3D(*s, log10PrimaryEnergy, cosPrimaryZenith, scale); }
                 s = splines.attenSplines[GPU_FLUX_PROMPT][ptypeIdx];
@@ -788,7 +934,7 @@ void launchEventWeightsSquaredKernel(
  * @param numEvents Total number of events
  * @param enableTotalNorm Steering parameter for normalization mode
  */
-__global__ void computeEventWeightsWithSquaresKernel(
+__global__ __launch_bounds__(256, 2) void computeEventWeightsWithSquaresKernel(
     const GPUEventDataSoA events,
     const double* __restrict__ params,
     const GPUSplineLookup splines,
@@ -819,10 +965,7 @@ __global__ void computeEventWeightsWithSquaresKernel(
     // Load event data (coalesced reads from SoA)
     //--------------------------------------------------------------------------
 
-    const float energy = events.energy[tid];
-    const float zenith = events.zenith[tid];
     const float primaryEnergy = events.primaryEnergy[tid];
-    const float primaryZenith = events.primaryZenith[tid];
     const int32_t primaryType = events.primaryType[tid];
     const int32_t numEventsInBin = events.numEvents[tid];
     const uint32_t topology = events.topology[tid];
@@ -832,7 +975,6 @@ __global__ void computeEventWeightsWithSquaresKernel(
     const double cachedPromptWeight = events.cachedPromptWeight[tid];
     const double cachedAstroWeight = events.cachedAstroWeight[tid];
 
-    // Cached spline reference values (pre-computed at reference point)
     // Atmospheric weights (MIXED PRECISION: FP32)
     const float cachedAtmDensity = events.cachedAtmDensity[tid];
     const float cachedKaonLosses = events.cachedKaonLosses[tid];
@@ -853,9 +995,9 @@ __global__ void computeEventWeightsWithSquaresKernel(
     // Compute spline-based corrections
     //--------------------------------------------------------------------------
 
-    // Precompute coordinates for spline evaluation
-    const double log10Energy = log10((double)energy);
-    const double cosZenith = cos((double)zenith);
+    // Use precomputed transcendentals (computed once at upload time)
+    const double log10Energy = events.log10Energy[tid];
+    const double cosZenith = events.cosZenith[tid];
 
     // Get current parameter values
     const double domEfficiency = s_params[P_DELTA_DOMEFF];
@@ -865,12 +1007,63 @@ __global__ void computeEventWeightsWithSquaresKernel(
     const int topoIdx = (topology < GPU_NUM_TOPOLOGIES) ? topology : 0;
 
     // Compute DOM efficiency corrections for each flux component
-    // Use reference values from splines struct (CPU re-evaluates at reference every time)
     double convDOMEff = 1.0;
     double promptDOMEff = 1.0;
     double astroDOMEff = 1.0;
 
-    if (splines.hasSplines) {
+    // Compute hole ice corrections for each flux component
+    double convHoleIce = 1.0;
+    double promptHoleIce = 1.0;
+    double astroHoleIce = 1.0;
+
+    if (splines.hasSplines && splines.basisCacheValid) {
+        // Load cached spline basis for DOM eff
+        const int domEffSpan0 = events.cachedDOMEffSpan0[tid];
+        const int domEffSpan1 = events.cachedDOMEffSpan1[tid];
+        float domEffBasis0[3] = {events.cachedDOMEffBasis00[tid], events.cachedDOMEffBasis01[tid], events.cachedDOMEffBasis02[tid]};
+        float domEffBasis1[3] = {events.cachedDOMEffBasis10[tid], events.cachedDOMEffBasis11[tid], events.cachedDOMEffBasis12[tid]};
+
+        // Load cached spline basis for hole ice
+        const int holeIceSpan0 = events.cachedHoleIceSpan0[tid];
+        const int holeIceSpan1 = events.cachedHoleIceSpan1[tid];
+        float holeIceBasis0[3] = {events.cachedHoleIceBasis00[tid], events.cachedHoleIceBasis01[tid], events.cachedHoleIceBasis02[tid]};
+        float holeIceBasis1[3] = {events.cachedHoleIceBasis10[tid], events.cachedHoleIceBasis11[tid], events.cachedHoleIceBasis12[tid]};
+
+        // Load cached reference spline values
+        const double cachedRefDOMEffConv = events.cachedDOMEffConv[tid];
+        const double cachedRefDOMEffPrompt = events.cachedDOMEffPrompt[tid];
+        const double cachedRefDOMEffAstro = events.cachedDOMEffAstro[tid];
+        const double cachedRefHoleIceConv = events.cachedHoleIceConv[tid];
+        const double cachedRefHoleIcePrompt = events.cachedHoleIcePrompt[tid];
+        const double cachedRefHoleIceAstro = events.cachedHoleIceAstro[tid];
+
+        convDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_CONV][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffConv);
+        promptDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_PROMPT][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffPrompt);
+        astroDOMEff = computeDOMEffCorrectionCached(
+            splines.domEffSplines[GPU_FLUX_ASTRO][topoIdx],
+            domEffSpan0, domEffSpan1, domEffBasis0, domEffBasis1,
+            domEfficiency, cachedRefDOMEffAstro);
+
+        convHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_CONV][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIceConv);
+        promptHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_PROMPT][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIcePrompt);
+        astroHoleIce = computeHoleIceCorrectionCached(
+            splines.holeIceSplines[GPU_FLUX_ASTRO][topoIdx],
+            holeIceSpan0, holeIceSpan1, holeIceBasis0, holeIceBasis1,
+            holeiceForward, cachedRefHoleIceAstro);
+    } else if (splines.hasSplines) {
+        // Fallback: original full evaluation
         convDOMEff = computeDOMEffCorrection(
             splines.domEffSplines[GPU_FLUX_CONV][topoIdx],
             log10Energy, cosZenith, domEfficiency, splines.domEffReference);
@@ -880,14 +1073,7 @@ __global__ void computeEventWeightsWithSquaresKernel(
         astroDOMEff = computeDOMEffCorrection(
             splines.domEffSplines[GPU_FLUX_ASTRO][topoIdx],
             log10Energy, cosZenith, domEfficiency, splines.domEffReference);
-    }
 
-    // Compute hole ice corrections for each flux component
-    double convHoleIce = 1.0;
-    double promptHoleIce = 1.0;
-    double astroHoleIce = 1.0;
-
-    if (splines.hasSplines) {
         convHoleIce = computeHoleIceCorrection(
             splines.holeIceSplines[GPU_FLUX_CONV][topoIdx],
             log10Energy, cosZenith, holeiceForward, splines.holeIceReference);
@@ -905,16 +1091,14 @@ __global__ void computeEventWeightsWithSquaresKernel(
     double astroAtt = 1.0;
 
     if (splines.hasSplines) {
-        const double cosPrimaryZenith = cos((double)primaryZenith);
+        const double cosPrimaryZenith = events.cosPrimaryZenith[tid];
         if (cosPrimaryZenith <= 0.1) {
             int ptypeIdx = mapParticleTypeToGPU(primaryType);
             if (ptypeIdx >= 0) {
                 double scale = (primaryType > 0) ? s_params[P_NUXS] : s_params[P_NUBARXS];
-                double log10PrimaryEnergy = log10((double)primaryEnergy);
+                const double log10PrimaryEnergy = events.log10PrimaryEnergy[tid];
 
                 const GPUSplineTable* s;
-                // OOB coordinates → evaluateSpline3D returns 0 → correction=0 → weight=0
-                // This matches CPU photospline behavior where OOB returns 0
                 s = splines.attenSplines[GPU_FLUX_CONV][ptypeIdx];
                 if (s != nullptr) { convAtt = evaluateSpline3D(*s, log10PrimaryEnergy, cosPrimaryZenith, scale); }
                 s = splines.attenSplines[GPU_FLUX_PROMPT][ptypeIdx];

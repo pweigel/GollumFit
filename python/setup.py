@@ -28,9 +28,29 @@ def find_cuda():
         return cuda_home, True
     return None, False
 
+def library_has_cuda():
+    """Check if the installed libGollumFit was built with CUDA support."""
+    lib_prefix = os.environ.get("PREFIX", "/usr/local")
+    for lib_dir in [os.path.join(lib_prefix, "lib"), os.path.join(lib_prefix, "lib64"),
+                    os.path.join("..", "lib")]:
+        lib_path = os.path.join(lib_dir, "libGollumFit.so")
+        if os.path.exists(lib_path):
+            try:
+                result = subprocess.run(["nm", "-D", lib_path], capture_output=True, text=True)
+                if "GPUFitAccelerator" in result.stdout:
+                    return True
+            except Exception:
+                pass
+    return False
+
 cuda_home, use_cuda = find_cuda()
 if use_cuda:
-    print(f"CUDA found at: {cuda_home}")
+    # Only enable CUDA in bindings if the library was also built with CUDA
+    if library_has_cuda():
+        print(f"CUDA found at: {cuda_home}, library has CUDA symbols - enabling GPU support")
+    else:
+        print(f"CUDA toolkit found at: {cuda_home}, but libGollumFit was built without CUDA - disabling GPU support")
+        use_cuda = False
 else:
     print("CUDA not found - building without GPU acceleration")
 

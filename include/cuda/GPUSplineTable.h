@@ -414,6 +414,59 @@ __device__ inline double evaluateSpline2D(
 }
 
 /**
+ * @brief Evaluate a 3D B-spline using precomputed span + basis for dims 0&1
+ *
+ * This function skips findKnotSpan and evaluateBasis for the first two
+ * dimensions, using cached values from precomputeReferenceSplines instead.
+ * Only dimension 2 (the varying parameter) is evaluated fresh.
+ *
+ * @param spline Spline table structure
+ * @param span0 Cached knot span for dim 0
+ * @param span1 Cached knot span for dim 1
+ * @param basis0_f 3 cached FP32 basis values for dim 0 (order <= 2)
+ * @param basis1_f 3 cached FP32 basis values for dim 1 (order <= 2)
+ * @param z Coordinate in dimension 2 (the only varying dimension)
+ * @return Interpolated value
+ */
+__device__ inline double evaluateSpline3DCached(
+    const GPUSplineTable& spline,
+    int span0, int span1,
+    const float* basis0_f,
+    const float* basis1_f,
+    double z
+) {
+    // Bounds check on z only (dims 0&1 were checked at precompute time)
+    if (z <= spline.knots[2][0] || z > spline.knots[2][spline.nknots[2] - 1])
+        return 0.0;
+
+    // Find knot span for dim 2 only
+    int span2 = findKnotSpan(z, spline.knots[2], spline.nknots[2], spline.order[2]);
+
+    // Evaluate basis for dim 2 only
+    double basis2[8];
+    evaluateBasis(z, spline.knots[2], spline.nknots[2], span2, spline.order[2], basis2);
+
+    // Tensor product with cached basis for dims 0&1
+    double result = 0.0;
+    for (int i = 0; i <= spline.order[0]; ++i) {
+        int idx0 = span0 - spline.order[0] + i;
+        double b0 = (double)basis0_f[i];
+        for (int j = 0; j <= spline.order[1]; ++j) {
+            int idx1 = span1 - spline.order[1] + j;
+            double b01 = b0 * (double)basis1_f[j];
+            for (int k = 0; k <= spline.order[2]; ++k) {
+                int idx2 = span2 - spline.order[2] + k;
+                int coeff_idx = idx0 * spline.strides[0] +
+                               idx1 * spline.strides[1] +
+                               idx2 * spline.strides[2];
+                result += b01 * basis2[k] * spline.coeffs[coeff_idx];
+            }
+        }
+    }
+    return result;
+}
+
+/**
  * @brief Evaluate a 3D B-spline at given coordinates
  *
  * @param spline Spline table structure

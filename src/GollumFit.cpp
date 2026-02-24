@@ -8,6 +8,14 @@
 
 namespace gollumfit {
 
+// Warm-start (s,y) pair state stored at file scope to avoid adding members
+// to GollumFit (which would change the class ABI and break Python bindings
+// built against a different libstdc++).
+static std::vector<std::vector<double>> s_warmStartS;
+static std::vector<std::vector<double>> s_warmStartY;
+static double s_warmStartTheta = 1.0;
+static bool s_hasWarmStartPairs = false;
+
 /*************************************************************************************************************
  * Constructor
  * **********************************************************************************************************/
@@ -988,6 +996,25 @@ public:
 } // anonymous namespace
 #endif
 
+void GollumFit::SetWarmStartHessian(const std::vector<double>& H, int dim) {
+    if ((int)H.size() != dim * dim)
+        throw std::invalid_argument("Hessian size mismatch: expected " +
+            std::to_string(dim * dim) + " elements, got " + std::to_string(H.size()));
+    warmStartH_ = H;
+    warmStartHDim_ = dim;
+    hasWarmStartH_ = true;
+}
+
+void GollumFit::ClearWarmStartHessian() {
+    warmStartH_.clear();
+    warmStartHDim_ = 0;
+    hasWarmStartH_ = false;
+    s_warmStartS.clear();
+    s_warmStartY.clear();
+    s_warmStartTheta = 1.0;
+    s_hasWarmStartPairs = false;
+}
+
 // make a copy of this function to ML-augment
 FitResult GollumFit::MinLLH() const {
   if(not likelihood_problem_constructed_)
@@ -996,16 +1023,9 @@ FitResult GollumFit::MinLLH() const {
   FitResult final_result;
   final_result.likelihood = std::numeric_limits<double>::max();
 
-  for(auto fitSeed : fitSeed_){
-    std::vector<double> seed=ConvertFitParameters(fitSeed);
-    prob_->setSeed(seed);
-
-    std::vector<unsigned int> fixedIndices;
-    std::vector<bool> FixVec=ConvertFitParametersFlag(fixedParams_);
-    for(size_t i=0; i!=FixVec.size(); i++)
-        if(FixVec[i]) fixedIndices.push_back(i);
-
-    phys_tools::lbfgsb::LBFGSB_Driver minimizer;
+  // Helper lambda to configure parameters on any minimizer (LBFGSB or BFGSB)
+  auto configureParams = [&](auto& minimizer, const std::vector<double>& seed,
+                             const std::vector<unsigned int>& fixedIndices) {
     minimizer.setGradientTolerance(steeringParams_.grad_tol);
     minimizer.setChangeTolerance(steeringParams_.change_tol);
 
@@ -1044,37 +1064,91 @@ FitResult GollumFit::MinLLH() const {
     minimizer.addParameter( seed[31], .001, boundParams_.astroNormMin,                 boundParams_.astroNormMax                 ); // astro norm
     minimizer.addParameter( seed[32], .001, boundParams_.astroDeltaGammaMin,           boundParams_.astroDeltaGammaMax           ); // astro delta gamma
     minimizer.addParameter( seed[33], .001, boundParams_.astroDeltaGammaSecMin,        boundParams_.astroDeltaGammaSecMax        ); // second astro component parameters
-    minimizer.addParameter( seed[34], .001, boundParams_.astroPivotMin,                boundParams_.astroPivotMax                ); // pivot point astro component 
+    minimizer.addParameter( seed[34], .001, boundParams_.astroPivotMin,                boundParams_.astroPivotMax                ); // pivot point astro component
     minimizer.addParameter( seed[35], .001, boundParams_.NeutrinoAntineutrinoRatioMin, boundParams_.NeutrinoAntineutrinoRatioMax ); // conv particle balance
     minimizer.addParameter( seed[36], .001, boundParams_.nuxsMin,                      boundParams_.nuxsMax                      ); // nuxs
     minimizer.addParameter( seed[37], .001, boundParams_.nubarxsMin,                   boundParams_.nubarxsMax                   ); // nubarxs
 
-    minimizer.setHistorySize(20);
-
     for(auto idx : fixedIndices){
       minimizer.fixParameter(idx);
     }
+  };
+
+  for(auto fitSeed : fitSeed_){
+    std::vector<double> seed=ConvertFitParameters(fitSeed);
+    prob_->setSeed(seed);
+
+    std::vector<unsigned int> fixedIndices;
+    std::vector<bool> FixVec=ConvertFitParametersFlag(fixedParams_);
+    for(size_t i=0; i!=FixVec.size(); i++)
+        if(FixVec[i]) fixedIndices.push_back(i);
 
     FitResult result;
-#ifdef GOLLUMFIT_USE_CUDA
-    if (gpu_acceleration_enabled_ && gpuAccelerator_) {
-      GPU_BFGS_Function gpuFunc(*this);
-      result.succeeded = minimizer.minimize(gpuFunc);
-    } else {
-      result.succeeded = DoFitLBFGSB(*prob_, minimizer);
-    }
-#else
-    result.succeeded = DoFitLBFGSB(*prob_, minimizer);
-#endif
-    result.likelihood=minimizer.minimumValue();
-    
-    // printing out LH here! 
-    std::cout << "LH: " << result.likelihood << std::endl; 
-    
-    result.params=ConvertVecToFitParameters(minimizer.minimumPosition());
 
-    result.nEval+=minimizer.numberOfEvaluations();
-    result.nGrad+=minimizer.numberOfEvaluations();
+    if (steeringParams_.minimizer_type == MinimizerType::BFGSB) {
+      // Use L-BFGS-B with full history (m=n), mathematically equivalent to BFGS
+      phys_tools::lbfgsb::LBFGSB_Driver minimizer;
+      configureParams(minimizer, seed, fixedIndices);
+
+      int nFree = static_cast<int>(seed.size()) - static_cast<int>(fixedIndices.size());
+      minimizer.setHistorySize(nFree);  // m=n -> equivalent to full BFGS
+      minimizer.setBuildInverseHessian(true);
+
+      // Inject warm-start (s,y) pairs from a previous optimization
+      if (hasWarmStartH_ && s_hasWarmStartPairs) {
+          minimizer.setWarmStart(s_warmStartS, s_warmStartY, s_warmStartTheta);
+      }
+
+#ifdef GOLLUMFIT_USE_CUDA
+      if (gpu_acceleration_enabled_ && gpuAccelerator_) {
+        GPU_BFGS_Function gpuFunc(*this);
+        result.succeeded = minimizer.minimize(gpuFunc);
+      } else {
+        result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+      }
+#else
+      result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+#endif
+
+      result.likelihood = minimizer.minimumValue();
+      std::cout << "LH: " << result.likelihood << std::endl;
+      result.params = ConvertVecToFitParameters(minimizer.minimumPosition());
+      result.nEval += minimizer.numberOfEvaluations();
+      result.nGrad += minimizer.numberOfEvaluations();
+
+      // Extract reconstructed inverse Hessian
+      result.inverseHessian = minimizer.getInverseHessian();
+      result.inverseHessianDim = minimizer.getInverseHessianDim();
+
+      // Save (s,y) pairs and theta for warm-starting a subsequent optimization
+      s_warmStartS = minimizer.getStoredS();
+      s_warmStartY = minimizer.getStoredY();
+      s_warmStartTheta = minimizer.getTheta();
+      s_hasWarmStartPairs = !s_warmStartS.empty();
+
+    } else {
+      // L-BFGS-B path (original default)
+      phys_tools::lbfgsb::LBFGSB_Driver minimizer;
+      configureParams(minimizer, seed, fixedIndices);
+      minimizer.setHistorySize(20);
+
+#ifdef GOLLUMFIT_USE_CUDA
+      if (gpu_acceleration_enabled_ && gpuAccelerator_) {
+        GPU_BFGS_Function gpuFunc(*this);
+        result.succeeded = minimizer.minimize(gpuFunc);
+      } else {
+        result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+      }
+#else
+      result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+#endif
+
+      result.likelihood = minimizer.minimumValue();
+      std::cout << "LH: " << result.likelihood << std::endl;
+      result.params = ConvertVecToFitParameters(minimizer.minimumPosition());
+      result.nEval += minimizer.numberOfEvaluations();
+      result.nGrad += minimizer.numberOfEvaluations();
+    }
 
     if(result.likelihood < final_result.likelihood)
       final_result = result;

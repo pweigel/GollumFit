@@ -22,7 +22,6 @@
 #include <PhysTools/likelihood/likelihood.h>
 #include <PhysTools/histogram.h>
 #include <PhysTools/bin_types.h>
-
 #include "GollumParameters.h"
 #include "Event.h"
 #include "analysisWeighting.h"
@@ -242,6 +241,13 @@ class GollumFit {
       bool succeeded=minimizer.minimize(BFGS_Function<LikelihoodType>(likelihood));
       return succeeded;
     }
+
+    // Warm-start inverse Hessian (dense matrix kept for user inspection / backward compatibility)
+    // Note: the actual warm-start (s,y) pair state is stored in GollumFit.cpp to
+    // avoid changing the class ABI (Python binding compatibility).
+    mutable std::vector<double> warmStartH_;
+    mutable int warmStartHDim_ = 0;
+    mutable bool hasWarmStartH_ = false;
 
   protected:
     // to check events
@@ -1308,6 +1314,24 @@ class GollumFit {
       priors_ = priors;
       priors_constructed_ = true;
     }
+
+    /**
+    * @brief Sets the inverse Hessian for warm-starting the minimizer.
+    *
+    * Stores the dense matrix and enables warm-start mode. The actual warm-start
+    * uses internally saved (s,y) correction pairs from the previous BFGS-B fit,
+    * which are injected into the L-BFGS-B internal state after the first iteration.
+    *
+    * @param H Row-major n×n inverse Hessian (size must equal dim*dim).
+    * @param dim Dimension n (number of free parameters).
+    * @throws std::invalid_argument If H.size() != dim*dim.
+    */
+    void SetWarmStartHessian(const std::vector<double>& H, int dim);
+
+    /**
+    * @brief Clears any previously set warm-start inverse Hessian.
+    */
+    void ClearWarmStartHessian();
 
 #ifdef GOLLUMFIT_USE_CUDA
     //==========================================================================

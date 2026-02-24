@@ -254,6 +254,17 @@ public:
      */
     void precomputeReferenceSplines();
 
+    /**
+     * @brief Override the basis cache valid flag (for benchmarking).
+     *
+     * When set to false, the weight kernels use the full spline evaluation
+     * fallback path instead of the cached basis path.
+     */
+    void setBasisCacheValid(bool valid) {
+        splineLookup_.basisCacheValid = valid;
+        basisCacheValid_ = valid;
+    }
+
     //==========================================================================
     // Likelihood Evaluation
     //==========================================================================

@@ -123,6 +123,11 @@ PYBIND11_MODULE(GollumFitPy, m)
     .export_values()
   ;
 
+  py::enum_<GF::MinimizerType>(m, "MinimizerType")
+    .value("LBFGSB", GF::MinimizerType::LBFGSB)
+    .value("BFGSB", GF::MinimizerType::BFGSB)
+  ;
+
   py::class_<GF::FitResult, std::shared_ptr<GF::FitResult> >(m, "FitResult")
     .def(py::init<>())
     .def_readwrite("params",&GF::FitResult::params)
@@ -131,6 +136,8 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def_readwrite("nEval",&GF::FitResult::nEval)
     .def_readwrite("nGrad",&GF::FitResult::nGrad)
     .def_readwrite("succeeded",&GF::FitResult::succeeded)
+    .def_readwrite("inverseHessian",&GF::FitResult::inverseHessian)
+    .def_readwrite("inverseHessianDim",&GF::FitResult::inverseHessianDim)
   ;
 
   py::class_<GF::hist_marray>(m, "hist_marray")
@@ -188,6 +195,7 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def_readwrite("energyName",&GF::SteeringParams::energyName)
     .def_readwrite("selectionStart",&GF::SteeringParams::selectionStart)
     .def_readwrite("enableTotalNorm",&GF::SteeringParams::enableTotalNorm)
+    .def_readwrite("minimizer_type",&GF::SteeringParams::minimizer_type)
   ;
 
 
@@ -522,6 +530,8 @@ PYBIND11_MODULE(GollumFitPy, m)
   py::class_<GF::GollumFit, std::shared_ptr<GF::GollumFit> >(m, "GollumFit")
     .def(py::init<GF::DataPaths, GF::SteeringParams>())
     .def("ReConfig",&GF::GollumFit::ReConfig<false>)
+    .def("SetSteeringParams",&GF::GollumFit::SetSteeringParams)
+    .def("GetSteeringParams",&GF::GollumFit::GetSteeringParams)
     .def("CheckDataLoaded",&GF::GollumFit::CheckDataLoaded)
     .def("CheckSimulationLoaded",&GF::GollumFit::CheckSimulationLoaded)
     .def("CheckCrossSectionWeighterConstructed",&GF::GollumFit::CheckCrossSectionWeighterConstructed)
@@ -571,6 +581,20 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def("SetFitParametersFlag",&GF::GollumFit::SetFitParametersFlag)
     .def("SetFitParametersBound",&GF::GollumFit::SetFitParametersBound)
     .def("SetFitParametersPriors",&GF::GollumFit::SetFitParametersPriors)
+    .def("SetWarmStartHessian",&GF::GollumFit::SetWarmStartHessian,
+        py::arg("H"), py::arg("dim"),
+        R"doc(
+        Set the inverse Hessian for warm-starting the BFGS-B minimizer.
+
+        Parameters
+        ----------
+        H : list of float
+            Row-major n×n inverse Hessian (length must equal dim*dim)
+        dim : int
+            Dimension n (number of free parameters)
+        )doc")
+    .def("ClearWarmStartHessian",&GF::GollumFit::ClearWarmStartHessian,
+        "Clear any previously set warm-start inverse Hessian.")
 #ifdef GOLLUMFIT_USE_CUDA
     //==========================================================================
     // GPU Acceleration Methods

@@ -445,16 +445,27 @@ struct Priors {
 };
 
 /**
+  * @enum MinimizerType
+  * @brief Selects the minimizer algorithm for likelihood minimization.
+  */
+enum class MinimizerType {
+    LBFGSB,   ///< Limited-memory BFGS-B (current default)
+    BFGSB     ///< Full BFGS-B with dense inverse Hessian
+};
+
+/**
   * @struct FitResult
   * @brief Struct to contain result of fit
-  * 
+  *
   */
 struct FitResult {
   FitParameters params;
   double likelihood;
   double aux_likelihood; ///<TO DO
-  unsigned int nEval, nGrad;
-  bool succeeded;
+  unsigned int nEval = 0, nGrad = 0;
+  bool succeeded = false;
+  std::vector<double> inverseHessian;  ///< Row-major n×n inverse Hessian, empty if L-BFGS-B
+  int inverseHessianDim = 0;           ///< Dimension n (number of free parameters)
 
   /**
   * @brief Constructor
@@ -567,6 +578,8 @@ struct SteeringParams {
   size_t evalThreads=4;
 
   double fullLivetime;
+
+  MinimizerType minimizer_type = MinimizerType::LBFGSB;
 
   double change_tol = 1.e-20;
   double grad_tol = 1.e-20;
