@@ -138,7 +138,11 @@ datapaths = gf.DataPaths()
 datapaths.domeff_spline_path      = "../../resources/Splines/DOMEffSplines/new_ddmnodeis/BDT/DnnEnergy_0.99"
 datapaths.holeice_spline_path     = "../../resources/Splines/HoleIceSplines/new_ddmnodeis/BDT/DnnEnergy_0.99"
 datapaths.attenuation_spline_path = "../../resources/Splines/AttenuationSplines/new_ddmnodeis"
+<<<<<<< HEAD
 datapaths.compact_file_path       = "../FastMC/null.fastmc"
+=======
+datapaths.compact_file_path       = "../FastMC/compact.fastmc"
+>>>>>>> upstream/fix_mcpath
 
 #####################################################################################
 # Configure Steering Parameters

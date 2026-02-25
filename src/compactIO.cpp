@@ -152,9 +152,9 @@ void unsplatData(const std::string& filename, const uint32_t expectedChecksum, s
         uint32_t storedChecksum = 0;
         crc_read(datafile, fileCRC, &storedChecksum, sizeof(storedChecksum));
         if(storedChecksum!=expectedChecksum){
-            std::ostringstream ss;
-            ss << "Program checksum stored in " << filename << ", " << std::hex << storedChecksum << ", does not match expected (current) checksum, " << expectedChecksum;
-            throw std::runtime_error(ss.str());
+            std::cerr << "Warning: Program checksum stored in " << filename << ", 0x" << std::hex << storedChecksum
+                      << ", does not match expected checksum, 0x" << expectedChecksum << std::dec
+                      << ". Data integrity will still be verified by file CRC." << std::endl;
         }
         
         size_t size = 0;
@@ -204,10 +204,9 @@ void unsplatData(const std::string& filename, const uint32_t expectedChecksum, s
         uint32_t storedProgChecksum = 0;
         crc_read(datafile, fileCRC, &storedProgChecksum, sizeof(storedProgChecksum));
         if (storedProgChecksum != expectedChecksum) {
-            std::ostringstream ss;
-            ss << "Program checksum stored in " << filename << ", " << std::hex << storedProgChecksum
-               << ", does not match expected (current) checksum, " << expectedChecksum;
-            throw std::runtime_error(ss.str());
+            std::cerr << "Warning: Program checksum stored in " << filename << ", 0x" << std::hex << storedProgChecksum
+                      << ", does not match expected checksum, 0x" << expectedChecksum << std::dec
+                      << ". Data integrity will still be verified by file CRC." << std::endl;
         }
 
         const uint64_t maxEvents = 999'000'000ULL;

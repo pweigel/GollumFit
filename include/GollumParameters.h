@@ -466,6 +466,9 @@ struct FitResult {
   bool succeeded = false;
   std::vector<double> inverseHessian;  ///< Row-major n×n inverse Hessian, empty if L-BFGS-B
   int inverseHessianDim = 0;           ///< Dimension n (number of free parameters)
+  std::vector<std::vector<double>> storedS;   ///< (s,y) S vectors from optimization
+  std::vector<std::vector<double>> storedY;   ///< (s,y) Y vectors from optimization
+  double storedTheta = 1.0;                   ///< Final theta (B_0 = theta*I scaling)
 
   /**
   * @brief Constructor

@@ -89,7 +89,7 @@ void GollumFit::LoadMC(){
 
   double livetime=steeringParams_.fullLivetime;
 
-  std::vector<MCSet> simSetsToLoad = sterile::GetSimulationSets(steeringParams_.simToLoad, dataPaths_.mc_path+ "/STERILE");
+  std::vector<MCSet> simSetsToLoad = sterile::GetSimulationSets(steeringParams_.simToLoad, dataPaths_.mc_path);
 
   auto simAction=[&](RecordID id, Event& e, double number_of_files, const DOMEfficiencySetter<Event>& domEff, const HoleIceSetter<Event>& holeIce){
 
@@ -493,7 +493,7 @@ void GollumFit::ConstructFluxWeighter(){
 void GollumFit::ConstructMonteCarloGenerationWeighter(){
   mcw_.clear();
 
-  std::vector<MCSet> simSetsToLoad = sterile::GetSimulationSets(steeringParams_.simToLoad, dataPaths_.mc_path+ "/STERILE");
+  std::vector<MCSet> simSetsToLoad = sterile::GetSimulationSets(steeringParams_.simToLoad, dataPaths_.mc_path);
   for(auto simset: simSetsToLoad ){
     for(auto g : simset.generators){
       mcw_.emplace_back(g);
@@ -938,7 +938,6 @@ std::pair<double, std::vector<double>> GollumFit::EvalLLHWithGradient(
   if (!likelihood_problem_constructed_)
     throw std::runtime_error("Likelihood problem has not been constructed..");
 
-  // GPU path: finite differences (~77 GPU evals)
   if (gpu_acceleration_enabled_ && gpuAccelerator_) {
     std::vector<double> gradient;
     double value = gpuAccelerator_->evaluateLikelihoodWithGradient(
@@ -1013,6 +1012,17 @@ void GollumFit::ClearWarmStartHessian() {
     s_warmStartY.clear();
     s_warmStartTheta = 1.0;
     s_hasWarmStartPairs = false;
+}
+
+void GollumFit::SetWarmStartPairs(
+    const std::vector<std::vector<double>>& S,
+    const std::vector<std::vector<double>>& Y,
+    double theta)
+{
+    s_warmStartS = S;
+    s_warmStartY = Y;
+    s_warmStartTheta = theta;
+    s_hasWarmStartPairs = !S.empty();
 }
 
 // make a copy of this function to ML-augment
@@ -1095,7 +1105,7 @@ FitResult GollumFit::MinLLH() const {
       minimizer.setBuildInverseHessian(true);
 
       // Inject warm-start (s,y) pairs from a previous optimization
-      if (hasWarmStartH_ && s_hasWarmStartPairs) {
+      if (s_hasWarmStartPairs) {
           minimizer.setWarmStart(s_warmStartS, s_warmStartY, s_warmStartTheta);
       }
 
@@ -1125,6 +1135,11 @@ FitResult GollumFit::MinLLH() const {
       s_warmStartY = minimizer.getStoredY();
       s_warmStartTheta = minimizer.getTheta();
       s_hasWarmStartPairs = !s_warmStartS.empty();
+
+      // Also put in result so Python can serialize to disk
+      result.storedS = s_warmStartS;
+      result.storedY = s_warmStartY;
+      result.storedTheta = s_warmStartTheta;
 
     } else {
       // L-BFGS-B path (original default)

@@ -9,6 +9,10 @@
  * cudaDeviceSynchronize barriers so that CPU-side Timer captures the
  * true GPU execution time.
  *
+ * Runs two configurations:
+ *   1. No splines (baseline) - forward kernel has no spline evaluation
+ *   2. With splines + cached basis - exercises the basisCacheValid path
+ *
  * Printed table columns:
  *   Events  Forward(ms)  Gradient(ms)  Ratio  ms/MEvent(fwd)  ms/MEvent(grad)
  */
@@ -101,13 +105,66 @@ std::vector<Event> createMockEvents(int numEvents, TestRNG& rng) {
     return events;
 }
 
-std::vector<double> createNominalParameters() {
+std::vector<double> createNominalParameters(bool withSplines) {
     std::vector<double> params(38, 0.0);
     params[0] = 1.0;   // convNorm
     params[1] = 1.0;   // promptNorm
     params[31] = 1.0;  // astroNorm
     params[35] = 1.0;  // neuaneu ratio
+    if (withSplines) {
+        params[29] = 1.1;   // DOM efficiency (near reference 1.27)
+        params[30] = -0.8;  // Hole ice forward (near reference -1.0)
+    }
     return params;
+}
+
+//==============================================================================
+// Helper: Create a 3D test spline (matching test_reference_caching.cu)
+//==============================================================================
+
+void uploadTestSpline(
+    GPUFitAccelerator& accel,
+    const std::string& name,
+    double paramMin,
+    double paramMax,
+    TestRNG& rng
+) {
+    const int ndim = 3;
+    const int order[3] = {2, 2, 2};  // quadratic B-splines
+
+    const int ncoeffsPerDim = 8;
+    const int nk[3] = {
+        ncoeffsPerDim + order[0] + 1,
+        ncoeffsPerDim + order[1] + 1,
+        ncoeffsPerDim + order[2] + 1
+    };
+
+    std::vector<std::vector<double>> knots(3);
+
+    // dim0: log10(energy) in [2, 6]
+    for (int i = 0; i < nk[0]; ++i) {
+        double t = (double)i / (nk[0] - 1);
+        knots[0].push_back(1.5 + t * 5.0);
+    }
+    // dim1: cos(zenith) in [-1, 0.2]
+    for (int i = 0; i < nk[1]; ++i) {
+        double t = (double)i / (nk[1] - 1);
+        knots[1].push_back(-1.2 + t * 1.7);
+    }
+    // dim2: parameter
+    for (int i = 0; i < nk[2]; ++i) {
+        double t = (double)i / (nk[2] - 1);
+        knots[2].push_back(paramMin - 0.5 + t * (paramMax - paramMin + 1.0));
+    }
+
+    int totalCoeffs = ncoeffsPerDim * ncoeffsPerDim * ncoeffsPerDim;
+    std::vector<double> coeffs(totalCoeffs);
+
+    for (int i = 0; i < totalCoeffs; ++i) {
+        coeffs[i] = 3.0 + rng.uniform(-0.5, 0.5);
+    }
+
+    accel.uploadSpline(name, ndim, order, knots, coeffs, nk);
 }
 
 //==============================================================================
@@ -118,7 +175,8 @@ struct TestAccelerator {
     std::unique_ptr<GPUFitAccelerator> accel;
     HistogramConfig histConfig;
 
-    void setup(int numEvents, int seed, bool withPriors) {
+    void setup(int numEvents, int seed, bool withPriors, bool withSplines,
+               bool forceBasisCacheOff = false) {
         TestRNG rng(seed);
         auto events = createMockEvents(numEvents, rng);
 
@@ -143,6 +201,36 @@ struct TestAccelerator {
             dataHist[i] = 5.0 + dataRng.uniform(-2.0, 2.0);
         }
         accel->uploadDataHistogram(dataHist);
+
+        if (withSplines) {
+            TestRNG splineRng(seed + 2000);
+
+            // DOM efficiency splines (6): 3 flux components x 2 topologies
+            uploadTestSpline(*accel, "domeff_atmConv_shower", 0.5, 1.8, splineRng);
+            uploadTestSpline(*accel, "domeff_atmConv_track", 0.5, 1.8, splineRng);
+            uploadTestSpline(*accel, "domeff_atmPrompt_shower", 0.5, 1.8, splineRng);
+            uploadTestSpline(*accel, "domeff_atmPrompt_track", 0.5, 1.8, splineRng);
+            uploadTestSpline(*accel, "domeff_diffuseAstro_shower", 0.5, 1.8, splineRng);
+            uploadTestSpline(*accel, "domeff_diffuseAstro_track", 0.5, 1.8, splineRng);
+
+            // Hole ice splines (6): 3 flux components x 2 topologies
+            uploadTestSpline(*accel, "holeice_atmConv_shower", -3.5, 1.5, splineRng);
+            uploadTestSpline(*accel, "holeice_atmConv_track", -3.5, 1.5, splineRng);
+            uploadTestSpline(*accel, "holeice_atmPrompt_shower", -3.5, 1.5, splineRng);
+            uploadTestSpline(*accel, "holeice_atmPrompt_track", -3.5, 1.5, splineRng);
+            uploadTestSpline(*accel, "holeice_diffuseAstro_shower", -3.5, 1.5, splineRng);
+            uploadTestSpline(*accel, "holeice_diffuseAstro_track", -3.5, 1.5, splineRng);
+
+            // Build spline lookup (sets hasSplines=true, basisCacheValid=true)
+            accel->buildSplineLookup();
+            // Precompute reference spline values + cached basis for dims 0&1
+            accel->precomputeReferenceSplines();
+
+            if (forceBasisCacheOff) {
+                // Force fallback to full spline evaluation (for A/B comparison)
+                accel->setBasisCacheValid(false);
+            }
+        }
 
         if (withPriors) {
             std::vector<PriorConfig> priors(38);
@@ -177,16 +265,18 @@ struct ScalingResult {
 // Run benchmark for a single event count
 //==============================================================================
 
-ScalingResult benchmarkAtSize(int numEvents, int warmupIters, int timedIters) {
+ScalingResult benchmarkAtSize(int numEvents, int warmupIters, int timedIters,
+                              bool withSplines, bool forceBasisCacheOff = false) {
     ScalingResult res;
     res.numEvents = numEvents;
 
     std::cout << "  Setting up " << numEvents << " events ... " << std::flush;
 
     TestAccelerator ta;
-    ta.setup(numEvents, /*seed=*/42, /*withPriors=*/false);
+    ta.setup(numEvents, /*seed=*/42, /*withPriors=*/false, withSplines,
+             forceBasisCacheOff);
 
-    auto params = createNominalParameters();
+    auto params = createNominalParameters(withSplines);
     std::vector<double> grad;
 
     std::cout << "done.\n" << std::flush;
@@ -237,6 +327,70 @@ ScalingResult benchmarkAtSize(int numEvents, int warmupIters, int timedIters) {
 }
 
 //==============================================================================
+// Print results table
+//==============================================================================
+
+void printResultsTable(const std::vector<ScalingResult>& results,
+                       const std::string& title) {
+    std::cout << "\n";
+    std::cout << "========================================\n";
+    std::cout << title << "\n";
+    std::cout << "========================================\n\n";
+
+    std::cout << std::setw(10) << "Events"
+              << std::setw(14) << "Forward(ms)"
+              << std::setw(14) << "Gradient(ms)"
+              << std::setw(8)  << "Ratio"
+              << std::setw(17) << "ms/MEvent(fwd)"
+              << std::setw(18) << "ms/MEvent(grad)"
+              << "\n";
+    std::cout << std::string(81, '-') << "\n";
+
+    for (const auto& r : results) {
+        std::cout << std::setw(10) << r.numEvents
+                  << std::setw(14) << std::fixed << std::setprecision(3) << r.forwardMs
+                  << std::setw(14) << std::fixed << std::setprecision(3) << r.gradientMs
+                  << std::setw(8)  << std::fixed << std::setprecision(2) << r.ratio
+                  << std::setw(17) << std::fixed << std::setprecision(3) << r.fwdPerMEvent
+                  << std::setw(18) << std::fixed << std::setprecision(3) << r.gradPerMEvent
+                  << "\n";
+    }
+}
+
+void printScalingAnalysis(const std::vector<ScalingResult>& results) {
+    if (results.size() < 2) return;
+
+    const auto& first = results.front();
+    const auto& last  = results.back();
+
+    double eventRatio = static_cast<double>(last.numEvents) / first.numEvents;
+    double fwdTimeRatio  = last.forwardMs  / first.forwardMs;
+    double gradTimeRatio = last.gradientMs / first.gradientMs;
+
+    std::cout << std::fixed << std::setprecision(1);
+    std::cout << "Event count ratio (last/first): " << eventRatio << "x\n";
+    std::cout << "Forward time ratio:             " << fwdTimeRatio << "x\n";
+    std::cout << "Gradient time ratio:            " << gradTimeRatio << "x\n\n";
+
+    double fwdScalingExp  = std::log(fwdTimeRatio) / std::log(eventRatio);
+    double gradScalingExp = std::log(gradTimeRatio) / std::log(eventRatio);
+
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "Scaling exponent (1.0 = linear, <1.0 = sub-linear):\n";
+    std::cout << "  Forward:  " << fwdScalingExp << "\n";
+    std::cout << "  Gradient: " << gradScalingExp << "\n\n";
+
+    double avgRatio = 0.0;
+    for (const auto& r : results)
+        avgRatio += r.ratio;
+    avgRatio /= results.size();
+
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "Average gradient/forward ratio: " << avgRatio << "x\n";
+    std::cout << "  (Ideal adjoint method: ~3-5x forward cost for 38 parameters)\n";
+}
+
+//==============================================================================
 // Main
 //==============================================================================
 
@@ -262,13 +416,6 @@ int main() {
     std::cout << "Memory Bandwidth: " << prop.memoryBusWidth << " bit @ "
               << prop.memoryClockRate / 1e6 << " GHz\n\n";
 
-    // -- Kernel configuration info --
-    std::cout << "Gradient kernel configuration:\n";
-    std::cout << "  Block size:    256 threads\n";
-    std::cout << "  launch_bounds: (256, 1)\n";
-    std::cout << "  Stack spill:   14600 bytes per thread (from ptxas)\n";
-    std::cout << "\n";
-
     // -- Benchmark parameters --
     const int warmupIters = 3;
     const int timedIters  = 5;
@@ -278,92 +425,97 @@ int main() {
 
     std::cout << "Warmup iterations: " << warmupIters << "\n";
     std::cout << "Timed iterations:  " << timedIters << "\n";
-    std::cout << "Using cudaDeviceSynchronize barriers for accurate CPU-side timing.\n\n";
+    std::cout << "Using cudaDeviceSynchronize barriers for accurate CPU-side timing.\n";
 
-    // -- Run benchmarks --
-    std::vector<ScalingResult> results;
-    results.reserve(eventCounts.size());
+    // =====================================================================
+    // Phase 1: No splines (baseline)
+    // =====================================================================
+    std::cout << "\n--- Phase 1: No splines (baseline) ---\n";
 
+    std::vector<ScalingResult> noSplineResults;
+    noSplineResults.reserve(eventCounts.size());
     for (int n : eventCounts) {
-        results.push_back(benchmarkAtSize(n, warmupIters, timedIters));
+        noSplineResults.push_back(benchmarkAtSize(n, warmupIters, timedIters, false));
     }
 
-    // -- Print table --
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "Results\n";
+    printResultsTable(noSplineResults, "Results: No Splines (baseline)");
+
+    std::cout << "\n========================================\n";
+    std::cout << "Scaling Analysis: No Splines\n";
+    std::cout << "========================================\n\n";
+    printScalingAnalysis(noSplineResults);
+
+    // =====================================================================
+    // Phase 2: With splines, full evaluation (basisCacheValid=false)
+    // =====================================================================
+    std::cout << "\n--- Phase 2: With splines, full evaluation (no caching) ---\n";
+
+    std::vector<ScalingResult> fullSplineResults;
+    fullSplineResults.reserve(eventCounts.size());
+    for (int n : eventCounts) {
+        fullSplineResults.push_back(
+            benchmarkAtSize(n, warmupIters, timedIters, true, /*forceBasisCacheOff=*/true));
+    }
+
+    printResultsTable(fullSplineResults,
+                      "Results: Splines Full Eval (basisCacheValid=false)");
+
+    // =====================================================================
+    // Phase 3: With splines + cached basis (basisCacheValid=true)
+    // =====================================================================
+    std::cout << "\n--- Phase 3: With splines + cached basis ---\n";
+
+    std::vector<ScalingResult> cachedSplineResults;
+    cachedSplineResults.reserve(eventCounts.size());
+    for (int n : eventCounts) {
+        cachedSplineResults.push_back(
+            benchmarkAtSize(n, warmupIters, timedIters, true, /*forceBasisCacheOff=*/false));
+    }
+
+    printResultsTable(cachedSplineResults,
+                      "Results: Splines Cached Basis (basisCacheValid=true)");
+
+    // =====================================================================
+    // Key Comparison: Full Eval vs Cached Basis (the optimization target)
+    // =====================================================================
+    std::cout << "\n========================================\n";
+    std::cout << "Comparison: Full Spline Eval vs Cached Basis\n";
     std::cout << "========================================\n\n";
 
     std::cout << std::setw(10) << "Events"
-              << std::setw(14) << "Forward(ms)"
-              << std::setw(14) << "Gradient(ms)"
-              << std::setw(8)  << "Ratio"
-              << std::setw(17) << "ms/MEvent(fwd)"
-              << std::setw(18) << "ms/MEvent(grad)"
+              << std::setw(12) << "Fwd(full)"
+              << std::setw(12) << "Fwd(cache)"
+              << std::setw(10) << "Speedup"
+              << std::setw(13) << "Grad(full)"
+              << std::setw(13) << "Grad(cache)"
+              << std::setw(10) << "Speedup"
               << "\n";
-    std::cout << std::string(81, '-') << "\n";
+    std::cout << std::string(80, '-') << "\n";
 
-    for (const auto& r : results) {
-        std::cout << std::setw(10) << r.numEvents
-                  << std::setw(14) << std::fixed << std::setprecision(3) << r.forwardMs
-                  << std::setw(14) << std::fixed << std::setprecision(3) << r.gradientMs
-                  << std::setw(8)  << std::fixed << std::setprecision(2) << r.ratio
-                  << std::setw(17) << std::fixed << std::setprecision(3) << r.fwdPerMEvent
-                  << std::setw(18) << std::fixed << std::setprecision(3) << r.gradPerMEvent
+    for (size_t i = 0; i < eventCounts.size(); ++i) {
+        double fwdSpeedup = fullSplineResults[i].forwardMs / cachedSplineResults[i].forwardMs;
+        double gradSpeedup = fullSplineResults[i].gradientMs / cachedSplineResults[i].gradientMs;
+
+        std::cout << std::setw(10) << eventCounts[i]
+                  << std::setw(12) << std::fixed << std::setprecision(3)
+                  << fullSplineResults[i].forwardMs
+                  << std::setw(12) << std::fixed << std::setprecision(3)
+                  << cachedSplineResults[i].forwardMs
+                  << std::setw(9) << std::fixed << std::setprecision(2)
+                  << fwdSpeedup << "x"
+                  << std::setw(13) << std::fixed << std::setprecision(3)
+                  << fullSplineResults[i].gradientMs
+                  << std::setw(13) << std::fixed << std::setprecision(3)
+                  << cachedSplineResults[i].gradientMs
+                  << std::setw(9) << std::fixed << std::setprecision(2)
+                  << gradSpeedup << "x"
                   << "\n";
     }
 
-    // -- Scaling analysis --
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "Scaling Analysis\n";
-    std::cout << "========================================\n\n";
-
-    if (results.size() >= 2) {
-        const auto& first = results.front();
-        const auto& last  = results.back();
-
-        double eventRatio = static_cast<double>(last.numEvents) / first.numEvents;
-        double fwdTimeRatio  = last.forwardMs  / first.forwardMs;
-        double gradTimeRatio = last.gradientMs / first.gradientMs;
-
-        std::cout << std::fixed << std::setprecision(1);
-        std::cout << "Event count ratio (last/first): " << eventRatio << "x\n";
-        std::cout << "Forward time ratio:             " << fwdTimeRatio << "x\n";
-        std::cout << "Gradient time ratio:            " << gradTimeRatio << "x\n";
-        std::cout << "\n";
-
-        // Linear scaling would give ratio == eventRatio
-        double fwdScalingExp  = std::log(fwdTimeRatio) / std::log(eventRatio);
-        double gradScalingExp = std::log(gradTimeRatio) / std::log(eventRatio);
-
-        std::cout << std::fixed << std::setprecision(3);
-        std::cout << "Scaling exponent (1.0 = linear, <1.0 = sub-linear):\n";
-        std::cout << "  Forward:  " << fwdScalingExp << "\n";
-        std::cout << "  Gradient: " << gradScalingExp << "\n";
-        std::cout << "\n";
-
-        // Average gradient/forward ratio
-        double avgRatio = 0.0;
-        for (const auto& r : results)
-            avgRatio += r.ratio;
-        avgRatio /= results.size();
-
-        std::cout << std::fixed << std::setprecision(2);
-        std::cout << "Average gradient/forward ratio: " << avgRatio << "x\n";
-        std::cout << "  (Ideal adjoint method: ~3-5x forward cost for "
-                  << "38 parameters)\n";
-    }
-
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "Notes\n";
-    std::cout << "========================================\n";
-    std::cout << "- Gradient kernel uses 14600 bytes stack spill per thread (ptxas)\n";
-    std::cout << "- Block config: 256 threads, launch_bounds(256,1)\n";
-    std::cout << "- High register + spill pressure limits occupancy\n";
-    std::cout << "- Sub-linear scaling at small N suggests kernel launch overhead dominates\n";
-    std::cout << "- Linear scaling at large N indicates memory-bandwidth or compute bound\n";
+    std::cout << "\n'Full eval' = basisCacheValid=false: recomputes reference splines\n";
+    std::cout << "  + full findKnotSpan+evaluateBasis for all 3 dims every call.\n";
+    std::cout << "'Cached basis' = basisCacheValid=true: uses precomputed reference values\n";
+    std::cout << "  + cached span/basis for dims 0&1, only evaluates dim 2 on the fly.\n";
 
     return 0;
 }

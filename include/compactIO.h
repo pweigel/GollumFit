@@ -3,6 +3,7 @@
 
 #include <deque>
 #include <fstream>
+#include <iostream>
 #include <boost/crc.hpp>
 #include <PhysTools/tableio.h>
 

@@ -138,6 +138,9 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def_readwrite("succeeded",&GF::FitResult::succeeded)
     .def_readwrite("inverseHessian",&GF::FitResult::inverseHessian)
     .def_readwrite("inverseHessianDim",&GF::FitResult::inverseHessianDim)
+    .def_readwrite("storedS",&GF::FitResult::storedS)
+    .def_readwrite("storedY",&GF::FitResult::storedY)
+    .def_readwrite("storedTheta",&GF::FitResult::storedTheta)
   ;
 
   py::class_<GF::hist_marray>(m, "hist_marray")
@@ -595,6 +598,20 @@ PYBIND11_MODULE(GollumFitPy, m)
         )doc")
     .def("ClearWarmStartHessian",&GF::GollumFit::ClearWarmStartHessian,
         "Clear any previously set warm-start inverse Hessian.")
+    .def("SetWarmStartPairs", &GF::GollumFit::SetWarmStartPairs,
+        py::arg("S"), py::arg("Y"), py::arg("theta"),
+        R"doc(
+        Set warm-start (s,y) pairs and theta for the BFGS-B minimizer.
+
+        Parameters
+        ----------
+        S : list of list of float
+            Position difference vectors from a previous optimization.
+        Y : list of list of float
+            Gradient difference vectors from a previous optimization.
+        theta : float
+            B_0 = theta*I scaling factor.
+        )doc")
 #ifdef GOLLUMFIT_USE_CUDA
     //==========================================================================
     // GPU Acceleration Methods

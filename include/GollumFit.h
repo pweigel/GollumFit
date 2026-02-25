@@ -1333,6 +1333,21 @@ class GollumFit {
     */
     void ClearWarmStartHessian();
 
+    /**
+    * @brief Set warm-start (s,y) pairs and theta for the BFGS-B minimizer.
+    *
+    * Directly populates the file-scope static warm-start state so that the
+    * next call to MinLLH() will inject these pairs into the optimizer.
+    *
+    * @param S Position difference vectors from a previous optimization.
+    * @param Y Gradient difference vectors from a previous optimization.
+    * @param theta B_0 = theta*I scaling factor.
+    */
+    void SetWarmStartPairs(
+        const std::vector<std::vector<double>>& S,
+        const std::vector<std::vector<double>>& Y,
+        double theta);
+
 #ifdef GOLLUMFIT_USE_CUDA
     //==========================================================================
     // GPU Acceleration Methods
