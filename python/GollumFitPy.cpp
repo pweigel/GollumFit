@@ -696,10 +696,18 @@ PYBIND11_MODULE(GollumFitPy, m)
         >>> print(f"  Weights: {stats.weightComputeMs:.3f} ms")
         >>> print(f"  Histogram: {stats.histogramMs:.3f} ms")
         )doc")
+    .def("GetGPUEventWeights", &GF::GollumFit::GetGPUEventWeights,
+        "Get per-event weights from the last GPU likelihood evaluation.")
+    .def("GetGPUExpectationHistogram", &GF::GollumFit::GetGPUExpectationHistogram,
+        "Get per-bin expectation histogram from the last GPU evaluation (GPU ordering: [E][Z][T]).")
+#endif
     .def("EvalLLHWithGradient", &GF::GollumFit::EvalLLHWithGradient,
         py::arg("params"), py::arg("include_prior"),
         R"doc(
-        Evaluate the likelihood and its gradient, using GPU if available.
+        Evaluate the likelihood and its gradient using the adjoint method.
+
+        Uses GPU if available, otherwise CPU adjoint (reverse-mode) which is
+        ~10x faster than the FD<38> forward-mode autodiff fallback.
 
         Parameters
         ----------
@@ -713,11 +721,6 @@ PYBIND11_MODULE(GollumFitPy, m)
         tuple of (float, list of float)
             (likelihood value, gradient vector)
         )doc")
-    .def("GetGPUEventWeights", &GF::GollumFit::GetGPUEventWeights,
-        "Get per-event weights from the last GPU likelihood evaluation.")
-    .def("GetGPUExpectationHistogram", &GF::GollumFit::GetGPUExpectationHistogram,
-        "Get per-bin expectation histogram from the last GPU evaluation (GPU ordering: [E][Z][T]).")
-#endif
   ;
 
   py::enum_<LW::ParticleType>(m, "ParticleType")

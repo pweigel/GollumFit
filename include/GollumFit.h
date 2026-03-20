@@ -1390,15 +1390,6 @@ class GollumFit {
     gpu::GPUFitAccelerator::TimingStats GetGPUTimingStats() const;
 
     /**
-     * @brief Evaluate the likelihood and its gradient, using GPU if available.
-     * @param params Parameter vector
-     * @param include_prior Whether to include prior terms
-     * @return Pair of (likelihood value, gradient vector)
-     */
-    std::pair<double, std::vector<double>> EvalLLHWithGradient(
-        std::vector<double> params, bool include_prior) const;
-
-    /**
      * @brief Get per-event weights from last GPU likelihood evaluation.
      * @return Vector of per-event weights [numEvents]
      */
@@ -1410,6 +1401,36 @@ class GollumFit {
      */
     std::vector<double> GetGPUExpectationHistogram() const;
 #endif
+
+    //==========================================================================
+    // Adjoint Gradient Methods (CPU reverse-mode, also used as GPU fallback)
+    //==========================================================================
+
+    /**
+     * @brief Evaluate the likelihood and its gradient using the adjoint method.
+     *
+     * Uses GPU if available, otherwise CPU adjoint (reverse-mode) which is
+     * ~10x faster than the FD<38> forward-mode autodiff fallback.
+     *
+     * @param params Parameter vector (38 doubles)
+     * @param include_prior Whether to include prior terms
+     * @return Pair of (likelihood value, gradient vector)
+     */
+    std::pair<double, std::vector<double>> EvalLLHWithGradient(
+        std::vector<double> params, bool include_prior) const;
+
+    /**
+     * @brief Precompute bin indices for each event in the simulation.
+     * Called once after histogram construction to enable the adjoint gradient.
+     */
+    void precomputeBinIndices() const;
+
+private:
+    mutable std::vector<double> adjointDataCount_;
+    mutable std::vector<int32_t> adjointBinIndex_;       // per-event bin index (-1 = none)
+    mutable std::vector<int32_t> adjointNumEventsInBin_; // per-event: num MC events in that bin
+    mutable int adjointNumBins_ = 0;
+    mutable bool adjointBinIndicesComputed_ = false;
 
 };
 

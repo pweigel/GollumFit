@@ -1089,11 +1089,16 @@ struct WeighterMaker{
         void SetAttenuationSplines(const AttenuationMapType& attenuation_splines){ attenuationSplines_ = std::make_shared<const AttenuationMapType>(attenuation_splines); attenuation_splines_loaded_ = true; }
         void SetSteering(const gollumfit::SteeringParams& steeringParams){steering = &steeringParams;}
 
+        // Accessors for spline maps (used by adjoint gradient)
+        const DOMMapType& domefficiencySplines() const { return *domefficiencySplines_; }
+        const HoleIceMapType& holeiceSplines() const { return *holeiceSplines_; }
+        const AttenuationMapType& attenuationSplines() const { return *attenuationSplines_; }
+
         /**
         * @brief Templated functor that calculates weights for events based on various components.
-        * 
+        *
         * This function uses a vector of parameters to calculate the weights for different flux components and applies corrections for various physical effects.
-        * 
+        *
         * @param params A vector of nuisance parameters used in the weight calculations.
         * @return A function that takes an `Event` and returns a weight of type `DataType`.
         */

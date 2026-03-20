@@ -2,9 +2,12 @@
 #include <algorithm>
 #include <iostream>
 
+#include <unordered_map>
+
 #include "GollumFit.h"
 #include "FastMode.h"
 #include "GollumMCSpecifications.h"
+#include "adjointGradient.h"
 
 namespace gollumfit {
 
@@ -932,32 +935,125 @@ phys_tools::autodiff::FD<38> GollumFit::EvalLLHGradient(std::vector<phys_tools::
   return -prob_->evaluateLikelihood(v);
 }
 
-#ifdef GOLLUMFIT_USE_CUDA
+void GollumFit::precomputeBinIndices() const {
+  if (adjointBinIndicesComputed_) return;
+
+  const size_t nEvents = mainSimulation_.size();
+  adjointBinIndex_.assign(nEvents, -1);
+  adjointNumEventsInBin_.assign(nEvents, 0);
+
+  // Build a map from Event address to index in mainSimulation_
+  std::unordered_map<const Event*, size_t> eventToIdx;
+  eventToIdx.reserve(nEvents);
+  for (size_t i = 0; i < nEvents; i++)
+    eventToIdx[&mainSimulation_[i]] = i;
+
+  // Iterate over histogram bins and tag each event
+  const auto& simH = std::get<0>(simHist_);
+  const auto& dataH = std::get<0>(dataHist_);
+
+  int binIdx = 0;
+  adjointDataCount_.clear();
+
+  auto dataIt = dataH.begin();
+  auto simIt = simH.begin();
+  while (simIt != simH.end()) {
+    // Count data in this bin
+    double dataCount = 0.0;
+    if (dataIt != dataH.end()) {
+      const auto& dataBin = *dataIt;
+      for (const auto& ref : dataBin)
+        dataCount += 1.0;
+      ++dataIt;
+    }
+    adjointDataCount_.push_back(dataCount);
+
+    // Count MC events in this bin and tag them
+    const auto& simBin = *simIt;
+    int nEventsInBin = 0;
+    std::vector<size_t> eventIndices;
+    for (const auto& ref : simBin) {
+      nEventsInBin += ref.get().num_events;
+      auto it = eventToIdx.find(&ref.get());
+      if (it != eventToIdx.end())
+        eventIndices.push_back(it->second);
+    }
+    for (size_t idx : eventIndices) {
+      adjointBinIndex_[idx] = binIdx;
+      adjointNumEventsInBin_[idx] = nEventsInBin;
+    }
+
+    binIdx++;
+    ++simIt;
+  }
+
+  adjointNumBins_ = binIdx;
+  adjointBinIndicesComputed_ = true;
+}
+
 std::pair<double, std::vector<double>> GollumFit::EvalLLHWithGradient(
     std::vector<double> params, bool include_prior) const {
   if (!likelihood_problem_constructed_)
     throw std::runtime_error("Likelihood problem has not been constructed..");
 
+#ifdef GOLLUMFIT_USE_CUDA
   if (gpu_acceleration_enabled_ && gpuAccelerator_) {
     std::vector<double> gradient;
     double value = gpuAccelerator_->evaluateLikelihoodWithGradient(
         params, gradient, include_prior);
     return {value, gradient};
   }
-
-  // CPU fallback: autodiff with FD<38>
-  using GradType = phys_tools::autodiff::FD<38>;
-  std::vector<GradType> ad_params(params.size());
-  for (size_t i = 0; i < params.size(); i++)
-    ad_params[i] = GradType(params[i], i);
-  GradType result = -prob_->evaluateLikelihood(ad_params, include_prior);
-
-  std::vector<double> gradient(params.size());
-  for (size_t i = 0; i < params.size(); i++)
-    gradient[i] = result.derivative(i);
-  return {result.value(), gradient};
-}
 #endif
+
+  // CPU adjoint (reverse-mode) gradient
+  if (!adjointBinIndicesComputed_) precomputeBinIndices();
+
+  std::vector<adjoint::EventIntermediates> intermediates(mainSimulation_.size());
+  std::vector<double> binSums(adjointNumBins_, 0.0);
+  std::vector<double> binSqSums(adjointNumBins_, 0.0);
+  std::vector<double> adjoint_wsum(adjointNumBins_);
+  std::vector<double> adjoint_w2sum(adjointNumBins_);
+  std::vector<double> gradient(params.size(), 0.0);
+
+  // Phase 1: Forward pass — scalar weights + cache intermediates
+  double nll = adjoint::adjointForwardPass(
+      params, mainSimulation_,
+      adjointBinIndex_, adjointNumEventsInBin_,
+      DFWM.domefficiencySplines(), DFWM.holeiceSplines(), DFWM.attenuationSplines(),
+      steeringParams_.enableTotalNorm,
+      steeringParams_.uncertaintyModSigmaOverMu,
+      intermediates, binSums, binSqSums,
+      adjointDataCount_, adjointNumBins_);
+
+  // Phase 2: Bin adjoints
+  adjoint::computeBinAdjoints(
+      adjointDataCount_, binSums, binSqSums,
+      steeringParams_.uncertaintyModSigmaOverMu,
+      adjoint_wsum, adjoint_w2sum, adjointNumBins_);
+
+  // Phase 3: Backward pass — analytic event gradients
+  adjoint::adjointBackwardPass(
+      params, mainSimulation_, intermediates,
+      adjointBinIndex_, adjointNumEventsInBin_,
+      adjoint_wsum, adjoint_w2sum,
+      steeringParams_.enableTotalNorm, gradient);
+
+  // Add prior gradient if requested.
+  // The prior is cheap (~38 operations) so we use FD<38> for just the prior term.
+  // We access the continuousPrior member of the LikelihoodProblem.
+  if (include_prior) {
+    using GradType = phys_tools::autodiff::FD<38>;
+    std::vector<GradType> ad_params(params.size());
+    for (size_t i = 0; i < params.size(); i++)
+      ad_params[i] = GradType(params[i], i);
+    GradType prior_result = prob_->continuousPrior.template operator()<GradType>(ad_params);
+    nll -= prior_result.value();  // nll = -logL, prior_result is logPrior
+    for (size_t i = 0; i < params.size(); i++)
+      gradient[i] -= prior_result.derivative(i);
+  }
+
+  return {nll, gradient};
+}
 
 void GollumFit::ForceFitSeedSanity(){
   for(auto & fitSeed: fitSeed_)
@@ -979,12 +1075,12 @@ void GollumFit::ForceFitSeedSanity(FitParameters& fitSeed) {
 
 }
 
-#ifdef GOLLUMFIT_USE_CUDA
 namespace {
-class GPU_BFGS_Function : public phys_tools::lbfgsb::BFGS_FunctionBase {
+// BFGS function adapter that uses EvalLLHWithGradient (adjoint on CPU, GPU if available)
+class Adjoint_BFGS_Function : public phys_tools::lbfgsb::BFGS_FunctionBase {
   const GollumFit& fitter_;
 public:
-  explicit GPU_BFGS_Function(const GollumFit& f) : fitter_(f) {}
+  explicit Adjoint_BFGS_Function(const GollumFit& f) : fitter_(f) {}
   double evalF(std::vector<double> x) const override {
     return fitter_.EvalLLH(x, true);
   }
@@ -993,7 +1089,6 @@ public:
   }
 };
 } // anonymous namespace
-#endif
 
 void GollumFit::SetWarmStartHessian(const std::vector<double>& H, int dim) {
     if ((int)H.size() != dim * dim)
@@ -1109,16 +1204,10 @@ FitResult GollumFit::MinLLH() const {
           minimizer.setWarmStart(s_warmStartS, s_warmStartY, s_warmStartTheta);
       }
 
-#ifdef GOLLUMFIT_USE_CUDA
-      if (gpu_acceleration_enabled_ && gpuAccelerator_) {
-        GPU_BFGS_Function gpuFunc(*this);
-        result.succeeded = minimizer.minimize(gpuFunc);
-      } else {
-        result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+      {
+        Adjoint_BFGS_Function adjFunc(*this);
+        result.succeeded = minimizer.minimize(adjFunc);
       }
-#else
-      result.succeeded = DoFitLBFGSB(*prob_, minimizer);
-#endif
 
       result.likelihood = minimizer.minimumValue();
       std::cout << "LH: " << result.likelihood << std::endl;
@@ -1133,8 +1222,24 @@ FitResult GollumFit::MinLLH() const {
       // Save (s,y) pairs and theta for warm-starting a subsequent optimization
       s_warmStartS = minimizer.getStoredS();
       s_warmStartY = minimizer.getStoredY();
-      s_warmStartTheta = minimizer.getTheta();
       s_hasWarmStartPairs = !s_warmStartS.empty();
+
+      // Compute theta = y_k^T y_k / y_k^T s_k from the last stored pair.
+      // This is the Barzilai-Borwein scaling that L-BFGS-B's matupd_()
+      // computes internally; we recompute it here because getTheta()
+      // extracts from a Fortran dsave buffer whose C indexing is unreliable.
+      if (s_hasWarmStartPairs) {
+          const auto& sLast = s_warmStartS.back();
+          const auto& yLast = s_warmStartY.back();
+          double yy = 0.0, ys = 0.0;
+          for (size_t i = 0; i < sLast.size(); ++i) {
+              yy += yLast[i] * yLast[i];
+              ys += yLast[i] * sLast[i];
+          }
+          s_warmStartTheta = (ys > 0.0) ? yy / ys : 1.0;
+      } else {
+          s_warmStartTheta = 1.0;
+      }
 
       // Also put in result so Python can serialize to disk
       result.storedS = s_warmStartS;
@@ -1147,16 +1252,10 @@ FitResult GollumFit::MinLLH() const {
       configureParams(minimizer, seed, fixedIndices);
       minimizer.setHistorySize(20);
 
-#ifdef GOLLUMFIT_USE_CUDA
-      if (gpu_acceleration_enabled_ && gpuAccelerator_) {
-        GPU_BFGS_Function gpuFunc(*this);
-        result.succeeded = minimizer.minimize(gpuFunc);
-      } else {
-        result.succeeded = DoFitLBFGSB(*prob_, minimizer);
+      {
+        Adjoint_BFGS_Function adjFunc(*this);
+        result.succeeded = minimizer.minimize(adjFunc);
       }
-#else
-      result.succeeded = DoFitLBFGSB(*prob_, minimizer);
-#endif
 
       result.likelihood = minimizer.minimumValue();
       std::cout << "LH: " << result.likelihood << std::endl;
