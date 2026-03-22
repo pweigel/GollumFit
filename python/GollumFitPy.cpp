@@ -462,6 +462,25 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def("GetExpectationEvents",(nsq::marray<double,2>(GF::GollumFit::*)(GF::FitParameters)const)&GF::GollumFit::GetExpectationEvents)
     .def("CheckExpectation",(int(GF::GollumFit::*)(GF::FitParameters)const)&GF::GollumFit::CheckExpectation)
     .def("EvalLLH",(double(GF::GollumFit::*)(GF::FitParameters,bool)const)&GF::GollumFit::EvalLLH)
+    .def("EvalLLHVec",(double(GF::GollumFit::*)(std::vector<double>,bool)const)&GF::GollumFit::EvalLLH,
+        py::arg("params"), py::arg("include_prior"),
+        "Evaluate likelihood from a parameter vector (38 doubles).")
+    .def("EvalLLHWithGradient", &GF::GollumFit::EvalLLHWithGradient,
+        py::arg("params"), py::arg("include_prior"),
+        "Evaluate likelihood and gradient using the adjoint (reverse-mode) method.")
+    .def("EvalLLHWithGradientFD", [](const GF::GollumFit& self, std::vector<double> params) {
+        using GradType = phys_tools::autodiff::FD<38>;
+        std::vector<GradType> ad_params(params.size());
+        for (size_t i = 0; i < params.size(); i++)
+            ad_params[i] = GradType(params[i], i);
+        GradType result = self.EvalLLHGradient(ad_params);
+        double nll = result.value();
+        std::vector<double> gradient(params.size());
+        for (size_t i = 0; i < params.size(); i++)
+            gradient[i] = result.derivative(i);
+        return std::make_pair(nll, gradient);
+    }, py::arg("params"),
+        "Evaluate likelihood+prior and gradient using FD<38> forward-mode autodiff. Always includes prior.")
     .def("SetData", &GF::GollumFit::SetData)
     .def("MinLLH",(GF::FitResult(GF::GollumFit::*)() const)&GF::GollumFit::MinLLH)
     .def("SetFitParametersSeed",(void(GF::GollumFit::*)(std::vector<GF::FitParameters>))&GF::GollumFit::SetFitParametersSeed)

@@ -160,6 +160,12 @@ class GollumFit {
     bool fixedParams_constructed_= (false);
     bool boundParams_constructed_= (false);
 
+    // Adjoint gradient: bin mapping (computed in ConstructLikelihoodProblem)
+    std::vector<double> adjointDataCount_;
+    std::vector<int32_t> adjointBinIndex_;
+    std::vector<int32_t> adjointNumEventsInBin_;
+    int adjointNumBins_ = 0;
+
     // splines flags
     bool domeff_spline_loaded_ = (false);
     bool holeice_spline_loaded_ = (false);
@@ -232,6 +238,10 @@ class GollumFit {
       bool succeeded=minimizer.minimize(BFGS_Function<LikelihoodType>(likelihood));
       return succeeded;
     }
+
+    /// Precompute bin indices mapping each event to its histogram bin.
+    /// Called from ConstructLikelihoodProblem().
+    void precomputeBinIndices();
 
   protected:
     // to check events
@@ -1172,6 +1182,19 @@ class GollumFit {
     * @return The gradient of the negative log-likelihood with respect to the nuisance parameters.
     */
     phys_tools::autodiff::FD<38> EvalLLHGradient(std::vector<phys_tools::autodiff::FD<38>> v) const;
+
+    /**
+    * @brief Evaluate likelihood and gradient using the adjoint (reverse-mode) method.
+    *
+    * The adjoint method computes scalar weights in a forward pass, caches intermediates,
+    * then backpropagates bin-level adjoints through analytic per-event derivatives.
+    *
+    * @param params Parameter vector (38 doubles)
+    * @param include_prior Whether to include prior terms
+    * @return Pair of (negative log-likelihood, gradient vector)
+    */
+    std::pair<double, std::vector<double>> EvalLLHWithGradient(
+        std::vector<double> params, bool include_prior) const;
 
     /**
     * @brief Minimize the negative log-likelihood for the set problem.

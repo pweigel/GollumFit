@@ -28,7 +28,33 @@
 namespace gollumfit{
 
 /**
-* 
+* @enum FitParameterIndex
+* @brief Canonical integer indices for the 38 nuisance parameters.
+*
+* This ordering must match:
+* - FitParameters struct field order
+* - ConvertFitParameters() push_back order
+* - WeighterMaker::operator() unpacking order (analysisWeighting.h)
+*/
+enum FitParameterIndex {
+    kConvNorm = 0,    kPromptNorm,     kZenithCorrection, kKaonLosses,
+    kHadronicHEkp,    kHadronicHEkm,   kHadronicVHE1pip,  kHadronicVHE1pim,
+    kHadronicVHE3kp,  kHadronicVHE3km, kHadronicVHE3pip,  kHadronicVHE3pim,
+    kHadronicVHE3p,   kHadronicVHE3n,
+    kCosmicRay1,      kCosmicRay2,     kCosmicRay3,       kCosmicRay4,
+    kCosmicRay5,      kCosmicRay6,
+    kIceGrad0,        kIceGrad1,       kIceGrad2,         kIceGrad3,
+    kIceGrad4,        kIceGrad5,       kIceGrad6,         kIceGrad7,
+    kIceGrad8,
+    kDomEfficiency,   kHoleiceForward,
+    kAstroNorm,       kAstroDeltaGamma, kAstroDeltaGammaSec,
+    kAstroPivot,      kNeutrinoAntineutrinoRatio,
+    kNuXS,            kNuBarXS,
+    kNumFitParameters  // = 38
+};
+
+/**
+*
 * @struct FitParameters
 * @brief Struct to store all the nuisance parameters for the fit.
 */

@@ -1,10 +1,12 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <unordered_map>
 
 #include "GollumFit.h"
 #include "FastMode.h"
 #include "GollumMCSpecifications.h"
+#include "adjointGradient.h"
 
 namespace gollumfit {
 
@@ -898,6 +900,9 @@ void GollumFit::ConstructLikelihoodProblem(){
   prob_->setEvaluationThreadCount(steeringParams_.evalThreads);
   prob_->likelihoodFunction.SetSigmaOverMu(steeringParams_.uncertaintyModSigmaOverMu);
 
+  // Precompute bin indices for adjoint gradient
+  precomputeBinIndices();
+
   likelihood_problem_constructed_=true;
 }
 
@@ -915,6 +920,105 @@ double GollumFit::EvalLLH(FitParameters nuisance, bool include_prior) const {
 phys_tools::autodiff::FD<38> GollumFit::EvalLLHGradient(std::vector<phys_tools::autodiff::FD<38>> v) const {
   return -prob_->evaluateLikelihood(v);
 }
+
+void GollumFit::precomputeBinIndices() {
+  const size_t nEvents = mainSimulation_.size();
+  adjointBinIndex_.assign(nEvents, -1);
+  adjointNumEventsInBin_.assign(nEvents, 0);
+
+  // Map Event address -> index in mainSimulation_
+  std::unordered_map<const Event*, size_t> eventToIdx;
+  eventToIdx.reserve(nEvents);
+  for (size_t i = 0; i < nEvents; i++)
+    eventToIdx[&mainSimulation_[i]] = i;
+
+  const auto& simH = std::get<0>(simHist_);
+  const auto& dataH = std::get<0>(dataHist_);
+
+  int binIdx = 0;
+  adjointDataCount_.clear();
+
+  auto dataIt = dataH.begin();
+  auto simIt = simH.begin();
+  while (simIt != simH.end()) {
+    double dataCount = 0.0;
+    if (dataIt != dataH.end()) {
+      for (const auto& ref : *dataIt) dataCount += 1.0;
+      ++dataIt;
+    }
+    adjointDataCount_.push_back(dataCount);
+
+    const auto& simBin = *simIt;
+    int nEvInBin = 0;
+    std::vector<size_t> indices;
+    for (const auto& ref : simBin) {
+      nEvInBin += ref.get().num_events;
+      auto it = eventToIdx.find(&ref.get());
+      if (it != eventToIdx.end()) indices.push_back(it->second);
+    }
+    for (size_t idx : indices) {
+      adjointBinIndex_[idx] = binIdx;
+      adjointNumEventsInBin_[idx] = nEvInBin;
+    }
+    binIdx++;
+    ++simIt;
+  }
+
+  adjointNumBins_ = binIdx;
+}
+
+std::pair<double, std::vector<double>> GollumFit::EvalLLHWithGradient(
+    std::vector<double> params, bool include_prior) const {
+  if (!likelihood_problem_constructed_)
+    throw std::runtime_error("Likelihood problem has not been constructed..");
+
+  std::vector<adjoint::EventCache> cache(mainSimulation_.size());
+  std::vector<double> binSums(adjointNumBins_, 0.0);
+  std::vector<double> binSqSums(adjointNumBins_, 0.0);
+  std::vector<double> adj_ws(adjointNumBins_);
+  std::vector<double> adj_w2s(adjointNumBins_);
+  std::vector<double> gradient(params.size(), 0.0);
+
+  double nll = adjoint::forwardPass(
+      params, mainSimulation_, adjointBinIndex_, adjointNumEventsInBin_,
+      DFWM.domefficiencySplines(), DFWM.holeiceSplines(), DFWM.attenuationSplines(),
+      steeringParams_.enableTotalNorm, steeringParams_.uncertaintyModSigmaOverMu,
+      cache, binSums, binSqSums, adjointDataCount_, adjointNumBins_);
+
+  adjoint::binAdjoints(adjointDataCount_, binSums, binSqSums,
+      steeringParams_.uncertaintyModSigmaOverMu, adj_ws, adj_w2s, adjointNumBins_);
+
+  adjoint::backwardPass(params, mainSimulation_, cache,
+      adjointBinIndex_, adjointNumEventsInBin_,
+      adj_ws, adj_w2s, steeringParams_.enableTotalNorm, gradient);
+
+  if (include_prior) {
+    using GradType = phys_tools::autodiff::FD<38>;
+    std::vector<GradType> ad_params(params.size());
+    for (size_t i = 0; i < params.size(); i++)
+      ad_params[i] = GradType(params[i], i);
+    GradType prior_result = prob_->continuousPrior.template operator()<GradType>(ad_params);
+    nll -= prior_result.value();
+    for (size_t i = 0; i < params.size(); i++)
+      gradient[i] -= prior_result.derivative(i);
+  }
+
+  return {nll, gradient};
+}
+
+namespace {
+class Adjoint_BFGS_Function : public phys_tools::lbfgsb::BFGS_FunctionBase {
+  const GollumFit& fitter_;
+public:
+  explicit Adjoint_BFGS_Function(const GollumFit& f) : fitter_(f) {}
+  double evalF(std::vector<double> x) const override {
+    return fitter_.EvalLLH(x, true);
+  }
+  std::pair<double, std::vector<double>> evalFG(std::vector<double> x) const override {
+    return fitter_.EvalLLHWithGradient(x, true);
+  }
+};
+} // anonymous namespace
 
 void GollumFit::ForceFitSeedSanity(){
   for(auto & fitSeed: fitSeed_)
@@ -1004,7 +1108,10 @@ FitResult GollumFit::MinLLH() const {
     }
 
     FitResult result;
-    result.succeeded=DoFitLBFGSB(*prob_, minimizer);
+    {
+      Adjoint_BFGS_Function adjFunc(*this);
+      result.succeeded = minimizer.minimize(adjFunc);
+    }
     result.likelihood=minimizer.minimumValue();
     
     // printing out LH here! 
