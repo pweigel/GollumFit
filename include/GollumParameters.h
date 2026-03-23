@@ -50,7 +50,7 @@ enum FitParameterIndex {
     kAstroNorm,       kAstroDeltaGamma, kAstroDeltaGammaSec,
     kAstroPivot,      kNeutrinoAntineutrinoRatio,
     kNuXS,            kNuBarXS,
-    kNumFitParameters  // = 38
+    kNumFitParameters
 };
 
 /**
@@ -479,8 +479,16 @@ struct FitResult {
   FitParameters params;
   double likelihood;
   double aux_likelihood; ///<TO DO
-  unsigned int nEval, nGrad;
-  bool succeeded;
+  unsigned int nEval = 0;
+  unsigned int nGrad = 0;
+  bool succeeded = false;
+
+  // Extended results (populated by Minuit2 when available)
+  std::vector<double> paramErrors;        ///< 1-sigma parabolic errors (from HESSE)
+  std::vector<double> covarianceMatrix;   ///< Full covariance matrix (row-major, npar x npar)
+  int covarianceDim = 0;                  ///< Dimension of covariance matrix
+  bool hasCovariance = false;             ///< Whether covariance was computed
+  double edm = 0;                         ///< Estimated distance to minimum
 
   /**
   * @brief Constructor
@@ -564,6 +572,15 @@ struct DataPaths {
 };
 
 /**
+* @enum MinimizerType
+* @brief Selects which minimization algorithm to use.
+*/
+enum class MinimizerType {
+    LBFGSB,     ///< L-BFGS-B from PhysTools (default)
+    Minuit2     ///< MIGRAD from ROOT's Minuit2 (optional, requires GOLLUMFIT_USE_MINUIT2)
+};
+
+/**
 * @struct SteeringParams
 * @brief Holds parameters used for steering simulations or analyses.
 *
@@ -604,6 +621,15 @@ struct SteeringParams {
   double selectionStart;
 
   bool enableTotalNorm = true;///< If true, convNorm is applied to all flux components
+
+  MinimizerType minimizer_type = MinimizerType::LBFGSB;
+
+  // Minuit2 settings (only used when minimizer_type == Minuit2)
+  int minuit2_strategy = 1;        ///< 0=fast, 1=default, 2=precise
+  unsigned int minuit2_maxfcn = 0; ///< Max function calls (0=auto: 200+100*npar)
+  double minuit2_tolerance = 0.1;  ///< EDM tolerance
+  bool minuit2_run_hesse = true;   ///< Run HESSE after MIGRAD for covariance
+  int minuit2_print_level = 0;     ///< 0=quiet, 1=normal, 2=verbose
 
   /**
   * @brief Default constructor.

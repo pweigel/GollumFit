@@ -126,6 +126,17 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def_readwrite("nEval",&GF::FitResult::nEval)
     .def_readwrite("nGrad",&GF::FitResult::nGrad)
     .def_readwrite("succeeded",&GF::FitResult::succeeded)
+    .def_readwrite("paramErrors",&GF::FitResult::paramErrors)
+    .def_readwrite("covarianceMatrix",&GF::FitResult::covarianceMatrix)
+    .def_readwrite("covarianceDim",&GF::FitResult::covarianceDim)
+    .def_readwrite("hasCovariance",&GF::FitResult::hasCovariance)
+    .def_readwrite("edm",&GF::FitResult::edm)
+  ;
+
+  py::enum_<GF::MinimizerType>(m, "MinimizerType")
+    .value("LBFGSB", GF::MinimizerType::LBFGSB)
+    .value("Minuit2", GF::MinimizerType::Minuit2)
+    .export_values()
   ;
 
   py::class_<GF::hist_marray>(m, "hist_marray")
@@ -183,6 +194,12 @@ PYBIND11_MODULE(GollumFitPy, m)
     .def_readwrite("energyName",&GF::SteeringParams::energyName)
     .def_readwrite("selectionStart",&GF::SteeringParams::selectionStart)
     .def_readwrite("enableTotalNorm",&GF::SteeringParams::enableTotalNorm)
+    .def_readwrite("minimizer_type",&GF::SteeringParams::minimizer_type)
+    .def_readwrite("minuit2_strategy",&GF::SteeringParams::minuit2_strategy)
+    .def_readwrite("minuit2_maxfcn",&GF::SteeringParams::minuit2_maxfcn)
+    .def_readwrite("minuit2_tolerance",&GF::SteeringParams::minuit2_tolerance)
+    .def_readwrite("minuit2_run_hesse",&GF::SteeringParams::minuit2_run_hesse)
+    .def_readwrite("minuit2_print_level",&GF::SteeringParams::minuit2_print_level)
   ;
 
 

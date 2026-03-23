@@ -8,6 +8,10 @@
 #include "GollumMCSpecifications.h"
 #include "adjointGradient.h"
 
+#ifdef GOLLUMFIT_USE_MINUIT2
+#include "GollumMinuit2.h"
+#endif
+
 namespace gollumfit {
 
 /*************************************************************************************************************
@@ -938,13 +942,14 @@ void GollumFit::precomputeBinIndices() {
   int binIdx = 0;
   adjointDataCount_.clear();
 
-  auto dataIt = dataH.begin();
   auto simIt = simH.begin();
   while (simIt != simH.end()) {
+    // Find matching data bin using the histogram's own bin-matching logic
+    // Data weight is e.cachedWeight, not 1.0 per event (see simpleLocalDataWeighter)
     double dataCount = 0.0;
+    auto dataIt = dataH.findBinIterator(simIt);
     if (dataIt != dataH.end()) {
-      for (const auto& ref : *dataIt) dataCount += 1.0;
-      ++dataIt;
+      for (const auto& ref : *dataIt) dataCount += ref.get().cachedWeight;
     }
     adjointDataCount_.push_back(dataCount);
 
@@ -1040,6 +1045,190 @@ void GollumFit::ForceFitSeedSanity(FitParameters& fitSeed) {
 
 }
 
+#ifdef GOLLUMFIT_USE_MINUIT2
+//==============================================================================
+// Minuit2 FCN adapter implementation
+//==============================================================================
+
+void GollumMinuit2FCN::ensureEvaluated(const std::vector<double>& params) const {
+    if (cacheValid_ && params == cachedParams_) return;
+    auto [nll, grad] = fitter_.EvalLLHWithGradient(params, true);
+    cachedParams_ = params;
+    cachedNLL_ = nll;
+    cachedGrad_ = std::move(grad);
+    cacheValid_ = true;
+}
+
+double GollumMinuit2FCN::operator()(const std::vector<double>& params) const {
+    ensureEvaluated(params);
+    return cachedNLL_;
+}
+
+std::vector<double> GollumMinuit2FCN::Gradient(const std::vector<double>& params) const {
+    ensureEvaluated(params);
+    return cachedGrad_;
+}
+
+//==============================================================================
+// Minuit2 minimization path
+//==============================================================================
+
+FitResult GollumFit::MinLLHMinuit2(const std::vector<double>& seed,
+                                    const std::vector<unsigned int>& fixedIndices) const {
+    using namespace ROOT::Minuit2;
+
+    MnPrint::SetGlobalLevel(steeringParams_.minuit2_print_level);
+
+    GollumMinuit2FCN fcn(*this);
+
+    // Parameter names matching FitParameterIndex ordering
+    const char* names[kNumFitParameters] = {
+        "convNorm", "promptNorm", "zenithCorrection", "kaonLosses",
+        "hadronicHEkp", "hadronicHEkm", "hadronicVHE1pip", "hadronicVHE1pim",
+        "hadronicVHE3kp", "hadronicVHE3km", "hadronicVHE3pip", "hadronicVHE3pim",
+        "hadronicVHE3p", "hadronicVHE3n",
+        "cosmicRay1", "cosmicRay2", "cosmicRay3", "cosmicRay4",
+        "cosmicRay5", "cosmicRay6",
+        "icegrad0", "icegrad1", "icegrad2", "icegrad3",
+        "icegrad4", "icegrad5", "icegrad6", "icegrad7", "icegrad8",
+        "domEfficiency", "holeiceForward",
+        "astroNorm", "astroDeltaGamma", "astroDeltaGammaSec",
+        "astroPivot", "NeutrinoAntineutrinoRatio",
+        "nuxs", "nubarxs"
+    };
+
+    // Bounds array matching the addParameter order in the L-BFGS-B path
+    double lo[kNumFitParameters] = {
+        boundParams_.convNormMin, boundParams_.promptNormMin,
+        boundParams_.zenithCorrectionMin, boundParams_.kaonLossesMin,
+        boundParams_.hadronicHEkpMin, boundParams_.hadronicHEkmMin,
+        boundParams_.hadronicVHE1pipMin, boundParams_.hadronicVHE1pimMin,
+        boundParams_.hadronicVHE3kpMin, boundParams_.hadronicVHE3kmMin,
+        boundParams_.hadronicVHE3pipMin, boundParams_.hadronicVHE3pimMin,
+        boundParams_.hadronicVHE3pMin, boundParams_.hadronicVHE3nMin,
+        boundParams_.cosmicRay1Min, boundParams_.cosmicRay2Min,
+        boundParams_.cosmicRay3Min, boundParams_.cosmicRay4Min,
+        boundParams_.cosmicRay5Min, boundParams_.cosmicRay6Min,
+        boundParams_.icegrad0Min, boundParams_.icegrad1Min,
+        boundParams_.icegrad2Min, boundParams_.icegrad3Min,
+        boundParams_.icegrad4Min, boundParams_.icegrad5Min,
+        boundParams_.icegrad6Min, boundParams_.icegrad7Min,
+        boundParams_.icegrad8Min,
+        boundParams_.domEfficiencyMin, boundParams_.holeiceForwardMin,
+        boundParams_.astroNormMin, boundParams_.astroDeltaGammaMin,
+        boundParams_.astroDeltaGammaSecMin,
+        boundParams_.astroPivotMin, boundParams_.NeutrinoAntineutrinoRatioMin,
+        boundParams_.nuxsMin, boundParams_.nubarxsMin
+    };
+    double hi[kNumFitParameters] = {
+        boundParams_.convNormMax, boundParams_.promptNormMax,
+        boundParams_.zenithCorrectionMax, boundParams_.kaonLossesMax,
+        boundParams_.hadronicHEkpMax, boundParams_.hadronicHEkmMax,
+        boundParams_.hadronicVHE1pipMax, boundParams_.hadronicVHE1pimMax,
+        boundParams_.hadronicVHE3kpMax, boundParams_.hadronicVHE3kmMax,
+        boundParams_.hadronicVHE3pipMax, boundParams_.hadronicVHE3pimMax,
+        boundParams_.hadronicVHE3pMax, boundParams_.hadronicVHE3nMax,
+        boundParams_.cosmicRay1Max, boundParams_.cosmicRay2Max,
+        boundParams_.cosmicRay3Max, boundParams_.cosmicRay4Max,
+        boundParams_.cosmicRay5Max, boundParams_.cosmicRay6Max,
+        boundParams_.icegrad0Max, boundParams_.icegrad1Max,
+        boundParams_.icegrad2Max, boundParams_.icegrad3Max,
+        boundParams_.icegrad4Max, boundParams_.icegrad5Max,
+        boundParams_.icegrad6Max, boundParams_.icegrad7Max,
+        boundParams_.icegrad8Max,
+        boundParams_.domEfficiencyMax, boundParams_.holeiceForwardMax,
+        boundParams_.astroNormMax, boundParams_.astroDeltaGammaMax,
+        boundParams_.astroDeltaGammaSecMax,
+        boundParams_.astroPivotMax, boundParams_.NeutrinoAntineutrinoRatioMax,
+        boundParams_.nuxsMax, boundParams_.nubarxsMax
+    };
+
+    // Set up Minuit2 parameters
+    MnUserParameters upar;
+    for (int i = 0; i < kNumFitParameters; i++) {
+        double step = 0.001;
+        upar.Add(names[i], seed[i], step, lo[i], hi[i]);
+    }
+    for (auto idx : fixedIndices) {
+        upar.Fix(idx);
+    }
+
+    // Run MIGRAD
+    std::cout << "[MINUIT2] Starting MIGRAD with strategy=" << steeringParams_.minuit2_strategy
+              << " maxfcn=" << steeringParams_.minuit2_maxfcn
+              << " tolerance=" << steeringParams_.minuit2_tolerance
+              << " nFreeParams=" << (kNumFitParameters - fixedIndices.size())
+              << std::endl;
+    MnStrategy strategy(steeringParams_.minuit2_strategy);
+    MnMigrad migrad(fcn, upar, strategy);
+    FunctionMinimum min = migrad(steeringParams_.minuit2_maxfcn,
+                                  steeringParams_.minuit2_tolerance);
+
+    // Extract results
+    FitResult result;
+    result.succeeded = min.IsValid();
+    result.likelihood = min.Fval();
+    result.edm = min.Edm();
+    result.nEval = static_cast<unsigned int>(min.NFcn());
+    result.nGrad = static_cast<unsigned int>(min.NFcn());
+
+    std::cout << "[MINUIT2] IsValid=" << min.IsValid()
+              << " HasValidCovariance=" << min.HasValidCovariance()
+              << " HasCovariance=" << min.HasCovariance()
+              << " IsAboveMaxEdm=" << min.IsAboveMaxEdm()
+              << " HasReachedCallLimit=" << min.HasReachedCallLimit()
+              << " Fval=" << min.Fval()
+              << " Edm=" << min.Edm()
+              << " NFcn=" << min.NFcn()
+              << " NStates=" << min.States().size()
+              << std::endl;
+
+    const MnUserParameterState& state = min.UserState();
+    std::vector<double> bestFit(kNumFitParameters);
+    for (int i = 0; i < kNumFitParameters; i++) {
+        bestFit[i] = state.Value(i);
+    }
+    result.params = ConvertVecToFitParameters(bestFit);
+
+    // Parabolic errors from MIGRAD's approximate Hessian
+    result.paramErrors.resize(kNumFitParameters);
+    for (int i = 0; i < kNumFitParameters; i++) {
+        result.paramErrors[i] = state.Error(i);
+    }
+
+    // Run HESSE for accurate covariance if requested
+    // Skip if MIGRAD already produced a valid covariance (common when analytic gradient is provided)
+    if (steeringParams_.minuit2_run_hesse && !min.HasValidCovariance()) {
+        std::cout << "[MINUIT2] Running HESSE for covariance..." << std::endl;
+        MnHesse hesse(strategy);
+        hesse(fcn, min);
+    }
+
+    if (min.HasValidCovariance()) {
+            const MnUserCovariance& cov = min.UserCovariance();
+            int npar = cov.Nrow();
+            result.covarianceMatrix.resize(npar * npar);
+            for (int i = 0; i < npar; i++) {
+                for (int j = 0; j < npar; j++) {
+                    result.covarianceMatrix[i * npar + j] = cov(i, j);
+                }
+            }
+                
+            result.covarianceDim = npar;
+            result.hasCovariance = true;
+
+            // Update errors from HESSE
+            const MnUserParameterState& hesseState = min.UserState();
+            for (int i = 0; i < kNumFitParameters; i++) {
+                result.paramErrors[i] = hesseState.Error(i);
+            }
+    }
+
+    std::cout << "LH: " << result.likelihood << std::endl;
+    return result;
+}
+#endif // GOLLUMFIT_USE_MINUIT2
+
 // make a copy of this function to ML-augment
 FitResult GollumFit::MinLLH() const {
   if(not likelihood_problem_constructed_)
@@ -1108,19 +1297,28 @@ FitResult GollumFit::MinLLH() const {
     }
 
     FitResult result;
-    {
-      Adjoint_BFGS_Function adjFunc(*this);
-      result.succeeded = minimizer.minimize(adjFunc);
-    }
-    result.likelihood=minimizer.minimumValue();
-    
-    // printing out LH here! 
-    std::cout << "LH: " << result.likelihood << std::endl; 
-    
-    result.params=ConvertVecToFitParameters(minimizer.minimumPosition());
 
-    result.nEval+=minimizer.numberOfEvaluations();
-    result.nGrad+=minimizer.numberOfEvaluations();
+#ifdef GOLLUMFIT_USE_MINUIT2
+    if (steeringParams_.minimizer_type == MinimizerType::Minuit2) {
+      result = MinLLHMinuit2(seed, fixedIndices);
+    } else {
+#endif
+      {
+        Adjoint_BFGS_Function adjFunc(*this);
+        result.succeeded = minimizer.minimize(adjFunc);
+      }
+      result.likelihood=minimizer.minimumValue();
+
+      // printing out LH here!
+      std::cout << "LH: " << result.likelihood << std::endl;
+
+      result.params=ConvertVecToFitParameters(minimizer.minimumPosition());
+
+      result.nEval+=minimizer.numberOfEvaluations();
+      result.nGrad+=minimizer.numberOfEvaluations();
+#ifdef GOLLUMFIT_USE_MINUIT2
+    } // close else from Minuit2 dispatch
+#endif
 
     if(result.likelihood < final_result.likelihood)
       final_result = result;

@@ -318,6 +318,11 @@ locations of dependencies:
 
   --with-photospline-config=BIN  	Path to photospline-config executable
 
+  --with-minuit2=DIR             	use the copy of Minuit2 in DIR
+                                 	assuming headers are in DIR/include
+                                 	and libraries in DIR/lib
+  --without-minuit2              	disable Minuit2 support
+
   --python-bin=PYTHON_EXECUTABLE  	use this python executable
                                  	(default is $PYTHON_EXE)
   --python-module-dir=DIR        	install python module to this directory, rather
@@ -428,6 +433,15 @@ do
 	if [ "$TMP" ]; then BOOST_LIBDIR="$TMP"; continue; fi
 	TMP=`echo "$var" | sed -n 's/^--with-boost-incdir=\(.*\)$/\1/p'`
 	if [ "$TMP" ]; then BOOST_INCDIR="$TMP"; continue; fi
+
+  # MINUIT2 #
+	TMP=`echo "$var" | sed -n 's/^--with-minuit2=\(.*\)$/\1/p'`
+	if [ "$TMP" ]; then
+		MINUIT2_DIR="${TMP}";
+	continue; fi
+	if [ "$var" = "--without-minuit2" ]; then
+		MINUIT2_DISABLED=1;
+	continue; fi
 
   # PYTHON #
 	TMP=`echo "$var" | sed -n 's/^--python-bin=\(.*\)$/\1/p'`
@@ -640,6 +654,51 @@ Cflags: -I${includedir}/GollumFit
 ' >> lib/gollumfit.pc
 
 ###################################################################################################
+# Minuit2 (optional)
+###################################################################################################
+
+MINUIT2_CFLAGS=""
+MINUIT2_LDFLAGS=""
+
+if [ ! "$MINUIT2_DISABLED" ]; then
+	# Try user-specified directory first
+	if [ "$MINUIT2_DIR" ]; then
+		if [ -e "$MINUIT2_DIR/include/Minuit2/MnMigrad.h" -a -e "$MINUIT2_DIR/lib/libMinuit2.so" ]; then
+			echo "Found Minuit2 in $MINUIT2_DIR"
+			MINUIT2_FOUND=1
+			MINUIT2_CFLAGS="-DGOLLUMFIT_USE_MINUIT2 -I$MINUIT2_DIR/include"
+			MINUIT2_LDFLAGS="-L$MINUIT2_DIR/lib -lMinuit2 -Wl,-rpath,$MINUIT2_DIR/lib"
+		elif [ -e "$MINUIT2_DIR/include/Minuit2/MnMigrad.h" -a -e "$MINUIT2_DIR/lib/libMinuit2.dylib" ]; then
+			echo "Found Minuit2 in $MINUIT2_DIR"
+			MINUIT2_FOUND=1
+			MINUIT2_CFLAGS="-DGOLLUMFIT_USE_MINUIT2 -I$MINUIT2_DIR/include"
+			MINUIT2_LDFLAGS="-L$MINUIT2_DIR/lib -lMinuit2 -Wl,-rpath,$MINUIT2_DIR/lib"
+		else
+			echo "Warning: Minuit2 not found in $MINUIT2_DIR"
+		fi
+	fi
+
+	# Try PREFIX (e.g., from ROOT installation)
+	if [ ! "$MINUIT2_FOUND" -a -e "$PREFIX/build/root/include/Minuit2/MnMigrad.h" ]; then
+		MINUIT2_ROOT_DIR="$PREFIX/build/root"
+		if [ -e "$MINUIT2_ROOT_DIR/lib/libMinuit2.so" -o -e "$MINUIT2_ROOT_DIR/lib/libMinuit2.dylib" ]; then
+			echo "Found Minuit2 in $MINUIT2_ROOT_DIR (from ROOT)"
+			MINUIT2_FOUND=1
+			MINUIT2_CFLAGS="-DGOLLUMFIT_USE_MINUIT2 -I$MINUIT2_ROOT_DIR/include"
+			MINUIT2_LDFLAGS="-L$MINUIT2_ROOT_DIR/lib -lMinuit2 -Wl,-rpath,$MINUIT2_ROOT_DIR/lib"
+		fi
+	fi
+
+	if [ "$MINUIT2_FOUND" ]; then
+		echo " Minuit2 support: ENABLED"
+	else
+		echo " Minuit2 support: disabled (not found; use --with-minuit2=DIR to enable)"
+	fi
+else
+	echo " Minuit2 support: disabled (--without-minuit2)"
+fi
+
+###################################################################################################
 # start generating Makefile
 ###################################################################################################
 
@@ -718,6 +777,9 @@ echo "CFITSIO_LDFLAGS=$CFITSIO_LDFLAGS" >> ./Makefile
 echo "HDF5_CFLAGS=$HDF5_CFLAGS" >> ./Makefile
 echo "HDF5_LDFLAGS=$HDF5_LDFLAGS" >> ./Makefile
 
+echo "MINUIT2_CFLAGS=$MINUIT2_CFLAGS" >> ./Makefile
+echo "MINUIT2_LDFLAGS=$MINUIT2_LDFLAGS" >> ./Makefile
+
 if [ "$BOOST_PYTHON_FOUND" ]; then
 	echo "PYTHON_CFLAGS=$PYTHON_CFLAGS" >> ./Makefile
 	echo "PYTHON_LDFLAGS=$PYTHON_LDFLAGS" >> ./Makefile
@@ -739,10 +801,10 @@ SRC_GF=$(PATH_GF)/src
 LIB_GF=$(PATH_GF)/lib
 
 # FLAGS
-CXXFLAGS+= -fPIC -I$(INC_GF) $(SQUIDS_CFLAGS) $(NUSQUIDS_CFLAGS) $(LEPTONWEIGHTER_CFLAGS) $(PHYSTOOLS_CFLAGS) $(PHOTOSPLINE_CFLAGS) $(CFITSIO_CFLAGS) $(BOOST_CFLAGS) $(HDF5_CFLAGS)
+CXXFLAGS+= -fPIC -I$(INC_GF) $(SQUIDS_CFLAGS) $(NUSQUIDS_CFLAGS) $(LEPTONWEIGHTER_CFLAGS) $(PHYSTOOLS_CFLAGS) $(PHOTOSPLINE_CFLAGS) $(CFITSIO_CFLAGS) $(BOOST_CFLAGS) $(HDF5_CFLAGS) $(MINUIT2_CFLAGS)
 
 LDFLAGS= -Wl,-rpath -Wl,$(LIB_GF) -L$(LIB_GF)
-LDFLAGS+= $(NUSQUIDS_LDFLAGS) $(SQUIDS_LDFLAGS) $(LEPTONWEIGHTER_LDFLAGS) $(PHYSTOOLS_LDFLAGS) $(PHOTOSPLINE_LDFLAGS) $(CFITSIO_LDFLAGS) $(BOOST_LDFLAGS) $(HDF5_LDFLAGS)
+LDFLAGS+= $(NUSQUIDS_LDFLAGS) $(SQUIDS_LDFLAGS) $(LEPTONWEIGHTER_LDFLAGS) $(PHYSTOOLS_LDFLAGS) $(PHOTOSPLINE_LDFLAGS) $(CFITSIO_LDFLAGS) $(BOOST_LDFLAGS) $(HDF5_LDFLAGS) $(MINUIT2_LDFLAGS)
 
 CXXFLAGS+=-I/usr/local/include/
 CXXFLAGS+=-I${PREFIX}/include/
@@ -813,7 +875,7 @@ $(LIB_GF)/GollumEnumDefinitions.o : $(SRC_GF)/GollumEnumDefinitions.cpp $(INC_GF
 $(LIB_GF)/utils.o : $(SRC_GF)/utils.cpp $(INC_GF)/utils.h
 	$(CXX) $(CXXFLAGS) $(SRC_GF)/utils.cpp -c -o $(LIB_GF)/utils.o
 
-$(LIB_GF)/GollumFit.o : $(SRC_GF)/GollumFit.cpp $(INC_GF)/Event.h $(INC_GF)/analysisWeighting.h $(INC_GF)/compactIO.h $(INC_GF)/GollumFit.h $(INC_GF)/GollumParameters.h $(INC_GF)/GollumEnumDefinitions.h $(INC_GF)/FastMode.h
+$(LIB_GF)/GollumFit.o : $(SRC_GF)/GollumFit.cpp $(INC_GF)/Event.h $(INC_GF)/analysisWeighting.h $(INC_GF)/compactIO.h $(INC_GF)/GollumFit.h $(INC_GF)/GollumParameters.h $(INC_GF)/GollumEnumDefinitions.h $(INC_GF)/FastMode.h $(INC_GF)/adjointGradient.h $(INC_GF)/GollumMinuit2.h
 	$(CXX) $(CXXFLAGS) $(SRC_GF)/GollumFit.cpp -c -o $(LIB_GF)/GollumFit.o
 
 $(DYN_PRODUCT) : $(OBJECTS)

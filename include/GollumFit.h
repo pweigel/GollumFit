@@ -1222,6 +1222,15 @@ class GollumFit {
     */
     FitResult MinLLH() const;
 
+#ifdef GOLLUMFIT_USE_MINUIT2
+    /**
+    * @brief Minimize the NLL using Minuit2's MIGRAD algorithm.
+    * Optionally runs HESSE for covariance matrix computation.
+    */
+    FitResult MinLLHMinuit2(const std::vector<double>& seed,
+                            const std::vector<unsigned int>& fixedIndices) const;
+#endif
+
     // get/set functions
     /**
     * @brief Steering parameters getter function. 
